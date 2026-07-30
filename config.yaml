@@ -1,0 +1,344 @@
+model:
+  default: deepseek-v4-flash
+  provider: deepseek
+providers:
+  custom: github
+agent:
+  reasoning_effort: max
+terminal:
+  backend: docker
+  docker_image: hermes-sandbox:latest
+  sandbox:
+    enabled: true
+    max_containers: 5
+    mem_limit_mb: 512
+    cpu_quota: 50000
+    default_timeout: 300
+web:
+  backend: ddgs
+  use_gateway: false
+browser:
+  cloud_provider: local
+  use_gateway: false
+kanban:
+  auto_decompose: true
+auxiliary:
+  vision:
+    provider: copilot
+    model: gpt-4o-mini
+  mcp:
+    provider: openai-api
+    model: gpt-5.6-sol
+  triage_specifier:
+    provider: deepseek
+    model: deepseek-v4-flash
+    base_url: https://api.deepseek.com/v1
+    api_key: ''
+    timeout: 30
+    extra_body:
+      enable_caching: true
+display:
+  pet:
+    enabled: true
+    slug: pet-package-zhizhi3-0
+    scale: 0.6
+dashboard:
+  theme: cyberpunk
+  basic_auth:
+    username: hermes
+    password_hash: scrypt$16384$8$1$XRinwDVKfiz7rGZgyiwlWg==$hlTVmLONmzw3KZgSAxaij53g4Hz3LXpAjZxsHRK3up4=
+  font: system-serif
+tts:
+  provider: edge
+  edge:
+    voice: ru-RU-DmitryNeural
+  enabled: true
+  voice: ru-RU-DmitryNeural
+stt:
+  enabled: true
+  provider: nemotron
+  format: txt
+  language: ru-RU
+  providers:
+    nemotron:
+      command: /usr/local/bin/nemo-stt.sh --input={input_path} --output={output_path}
+        --language={language}
+      language: ru-RU
+      timeout: 60
+      type: command
+voice:
+  auto_tts: false
+context:
+  engine: compressor
+  threshold_percent: 0.5
+memory:
+  user_profile_enabled: true
+  reflexion_enabled: true
+delegation:
+  model: deepseek-v4-flash
+  provider: deepseek
+  max_concurrent_children: 10
+  max_spawn_depth: 2
+  orchestrator_enabled: true
+  subagent_auto_approve: false
+  isolated_terminal: true
+  terminal_backend: docker
+  docker_image: hermes-sandbox:latest
+moa:
+  default_preset: default
+  presets:
+    default:
+      reference_models:
+        '0':
+          model: deepseek-v4-flash
+          provider: deepseek
+        '1':
+          model: deepseek-v4-flash
+          provider: deepseek
+      aggregator:
+        provider: deepseek
+        model: deepseek-v4-pro
+      aggregator_model:
+        model: deepseek-v4-pro
+        provider: deepseek
+      aggregator_temperature: 0.3
+      min_successful_references: 1
+      reference_temperature: 0.7
+    high_accuracy:
+      aggregator_model:
+        model: deepseek-v4-pro
+        provider: deepseek
+      aggregator_temperature: 0.1
+      min_successful_references: 2
+      reference_models:
+        '0':
+          model: deepseek-v4-flash
+          provider: deepseek
+        '1':
+          model: deepseek-v4-pro
+          provider: deepseek
+        '2':
+          model: deepseek-v4-pro
+          provider: deepseek
+      reference_temperature: 0.4
+skills:
+  disabled:
+    - agent-browser-cdp
+    - airtable
+    - apple-notes
+    - apple-reminders
+    - ascii-video
+    - audiocraft-audio-generation
+    - baoyu-infographic
+    - browser
+    - cdp-browser
+    - cdp-browser-automation
+    - claude-design
+    - codex
+    - comfyui
+    - computer-use
+    - dogfood
+    - evaluating-llms-harness
+    - findmy
+    - gif-search
+    - google-workspace
+    - heartmula
+    - himalaya
+    - huggingface-hub
+    - imessage
+    - llama-cpp
+    - manim-video
+    - notion
+    - obsidian
+    - opencode
+    - openhue
+    - segment-anything-model
+    - serving-llms-vllm
+    - songsee
+    - songwriting-and-ai-music
+    - stt-gguf-asr
+    - stt-setup
+    - touchdesigner-mcp
+    - weights-and-biases
+    - yuanbao
+  learn_enabled: true
+curator:
+  stale_after_days: 30
+timezone: MSK +3UTC
+approvals:
+  mode: smart
+command_allowlist:
+  - systemctl restart hermes-gateway
+onboarding:
+  seen:
+    busy_input_prompt: true
+    profile_build_offered: true
+_config_version: 33
+CRON_MODEL: deepseek/deepseek-v4-flash
+DEEPSEEK_BASE_URL: https://api.deepseek.com/v1
+MODEL: deepseek/deepseek-v4-pro
+TELEGRAM_ALLOWED_USERS: 353133098
+browser_tool:
+  enabled: false
+system_prompt_append: "=== DOM PROTOCOL — ОБЯЗАТЕЛЬНО К ИСПОЛНЕНИЮ ===\n\n1. НИКОГДА\
+  \ не используй browser_snapshot — это дорого и медленно.\n   ВСЕГДА используй browser_read_dom\
+  \ для чтения страницы.\n   browser_read_dom(max_chars=15000) — возвращает HTML со\
+  \ всеми data-testid.\n\n2. НИКОГДА не используй browser_click с координатами.\n\
+  \   ВСЕГДА используй browser_click_eval(selector=\"[data-testid='...']\") \n   или\
+  \ browser_click_eval(selector=\"button:text('Submit')\").\n\n3. Для чтения страницы:\n\
+  \   browser_read_dom() — прочитать DOM (заменяет snapshot)\n   browser_read_dom(show_all_text=true)\
+  \ — прочитать текст (если нужен только текст)\n\n4. Для заполнения форм:\n   browser_shipping_fill(все_параметры_сразу)\
+  \ — адрес + доставка\n   browser_payment_fill(все_параметры_сразу) — карта + Terms\
+  \ автоматом\n\n5. ЭТО ЭКОНОМИТ ТОКЕНЫ: \n   - snapshot = 1 скриншот + 1 LLM-вызов\
+  \ на распознавание\n   - read_dom = 1 JS eval (без LLM, без картинок)\n   - bulk\
+  \ fill = 1 LLM-раунд вместо 6\n\n6. Пример цикла для shopping:\n   a) browser_read_dom()\
+  \ — понять what's on the page\n   b) browser_click_eval(...) — найти и кликнуть\
+  \ по data-testid\n   c) browser_shipping_fill(...) — адрес за 1 раз\n   d) browser_payment_fill(...)\
+  \ — карта за 1 раз\n   e) Готово. Ни одного snapshot, ни одного координатного клика."
+custom_providers:
+  - api_key: ${GITHUB_TOKEN}
+    api_mode: openai
+    base_url: https://models.github.ai/inference
+    name: github
+fallback_model:
+  model: openai/gpt-4o-mini
+  provider: custom:github
+known_plugin_toolsets:
+  cli:
+    - spotify
+mcp_servers:
+  atomic_finance:
+    args:
+      - -m
+      - atomic_finance.hermes_bridge
+      - --mcp
+    command: python3
+    enabled: true
+  cbr:
+    args:
+      - -y
+      - '@theyahia/cbr-mcp'
+    command: npx
+    enabled: false
+  computer:
+    args:
+      - /root/.hermes/scripts/mcp-computer-use.py
+    command: python3
+    enabled: false
+  n8n:
+    args:
+      - /root/.hermes/n8n-mcp.py
+    command: python3
+    enabled: false
+  notebooklm:
+    command: /root/.local/bin/notebooklm-mcp
+    cwd: /root/.notebooklm-mcp-cli/profiles/default
+  router:
+    args:
+      - /root/.hermes/routerich_mcp_server.py
+    command: python3
+    enabled: true
+    env:
+      ROUTER_IP: 100.102.57.232
+      SSH_KEY: /root/.ssh/hermes_router
+  tinkoff:
+    args:
+      - /root/.hermes/tinkoff-mcp/server.py
+      - --stdio
+    command: python3
+    enabled: false
+  travelpayouts:
+    args:
+      - /usr/local/bin/travelpayouts-mcp.sh
+      - --connect-timeout
+      - '10'
+    command: /bin/bash
+    enabled: true
+  yahoo-finance:
+    args:
+      - -y
+      - yahoo-finance-mcp
+    command: npx
+    enabled: false
+  wikivibe:
+    url: https://wikivibe.ru/mcp/
+    enabled: true
+models:
+  github_gpt4_1:
+    model: openai/gpt-4.1
+    provider: custom:github
+  github_gpt4o:
+    model: openai/gpt-4o
+    provider: custom:github
+  github_gpt4o_mini:
+    model: openai/gpt-4o-mini
+    provider: custom:github
+  github_o3mini:
+    model: openai/o3-mini
+    provider: custom:github
+platform_toolsets:
+  cli:
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - context_engine
+    - cronjob
+    - delegation
+    - file
+    - image_gen
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - tts
+    - vision
+    - web
+    - workflow
+platforms:
+  api_server:
+    extra:
+      cors_origins:
+        - chrome-extension://ggfpdomfhbeoidemhcpipaldicfpjelh
+      host: 0.0.0.0
+      key: I7SO5UqL9zPxMNL9j5jpblz9K2yOj5un4bTaWNdUrpg
+      port: 8642
+  webhook:
+    enabled: true
+plugins:
+  disabled:
+    - browser-browser-use
+    - browser-browserbase
+  enabled:
+    - copilot-acp-provider
+    - copilot-provider
+    - deepseek-provider
+    - disk-cleanup
+    - model-router
+    - security-guidance
+    - telegram-platform
+    - web-ddgs
+    - web/ddgs
+  entries:
+    model-router:
+      allow_tool_override: false
+judge:
+  enabled: true
+
+# ── Security ──────────────────────────────────────────────────────────
+# Secret redaction is ON by default — strings that look like API keys,
+# tokens, and passwords are masked in tool output, logs, and chat
+# responses before the model or user ever sees them. Set redact_secrets
+# to false to disable (e.g. when developing the redactor itself).
+# tirith pre-exec scanning is enabled by default when the tirith binary
+# is available. Configure via security.tirith_* keys or env vars
+# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
+#
+# security:
+#   redact_secrets: true
+#   tirith_enabled: true
+#   tirith_path: "tirith"
+#   tirith_timeout: 5
+#   tirith_fail_open: true
