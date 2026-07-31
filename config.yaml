@@ -4,6 +4,8 @@ model:
 providers:
   custom: github
 agent:
+  max_turns: 90
+  api_max_retries: 3
   reasoning_effort: max
 terminal:
   backend: docker
@@ -20,20 +22,16 @@ web:
 browser:
   cloud_provider: local
   use_gateway: false
-kanban:
-  auto_decompose: true
 auxiliary:
   vision:
-    provider: copilot
-    model: gpt-4o-mini
+    provider: auto
+    model: ''
   mcp:
-    provider: openai-api
-    model: gpt-5.6-sol
+    provider: auto
+    model: ''
   triage_specifier:
-    provider: deepseek
-    model: deepseek-v4-flash
-    base_url: https://api.deepseek.com/v1
-    api_key: ''
+    provider: auto
+    model: ''
     timeout: 30
     extra_body:
       enable_caching: true
@@ -57,8 +55,8 @@ tts:
 stt:
   enabled: true
   provider: nemotron
-  format: txt
   language: ru-RU
+  format: txt
   providers:
     nemotron:
       command: /usr/local/bin/nemo-stt.sh --input={input_path} --output={output_path}
@@ -164,11 +162,13 @@ skills:
   learn_enabled: true
 curator:
   stale_after_days: 30
-timezone: MSK +3UTC
+timezone: Europe/Moscow
 approvals:
   mode: smart
 command_allowlist:
   - systemctl restart hermes-gateway
+kanban:
+  auto_decompose: true
 onboarding:
   seen:
     busy_input_prompt: true
@@ -306,6 +306,8 @@ platforms:
       key: I7SO5UqL9zPxMNL9j5jpblz9K2yOj5un4bTaWNdUrpg
       port: 8642
   webhook:
+    enabled: true
+  email:
     enabled: true
 plugins:
   disabled:

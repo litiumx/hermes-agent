@@ -1,0 +1,75 @@
+{
+  "task": "SCAN+BRANCH",
+  "query": "agent memory rag stars:>100",
+  "scanned_at": "2026-07-31",
+  "source": "GitHub Search API (sort=updated, order=desc, per_page=5)",
+  "total_matches": 101,
+  "repositories": [
+    {
+      "full_name": "volcengine/OpenViking",
+      "name": "OpenViking",
+      "url": "https://github.com/volcengine/OpenViking",
+      "stars": 27697,
+      "language": "Python",
+      "license": "AGPL-3.0",
+      "created_at": "2026-01-05",
+      "updated_at": "2026-07-31",
+      "topics": ["agent-memory", "agent-plugins", "agentic-rag", "context-database", "self-evolving"],
+      "summary": "Self-evolving Context Database для AI-агентов: объединяет память агента, Knowledge RAG и скиллы в единую базу контекста, которая эволюционирует сама по мере использования.",
+      "branches": [
+        {
+          "name": "Agentic RAG",
+          "description": "Слияние классического RAG с агентным контекстом: знания подтягиваются не запросом, а как часть живого контекста агента"
+        },
+        {
+          "name": "Self-evolving memory",
+          "description": "Контекстная база, которая сама перестраивается: устаревшие факты вытесняются, важные укрепляются, память консолидируется"
+        }
+      ]
+    },
+    {
+      "full_name": "moorcheh-ai/memanto",
+      "name": "Memanto",
+      "url": "https://github.com/moorcheh-ai/memanto",
+      "stars": 1744,
+      "language": "Python",
+      "license": "MIT",
+      "created_at": "2026-03-23",
+      "updated_at": "2026-07-31",
+      "topics": ["agent-memory", "ai-agents", "crewai", "langchain", "llm-memory", "long-term-memory", "semantic-memory", "stateful-ai", "rag"],
+      "summary": "Свежий (март 2026) слой долгосрочной семантической памяти для AI-агентов — \"память, которую обожают агенты\": хранение фактов, извлечение по смыслу, stateful-поведение агентов.",
+      "branches": [
+        {
+          "name": "Semantic long-term memory",
+          "description": "Долгосрочная семантическая память: факты об агенте/пользователе хранятся и достаются по смыслу, а не по ключу"
+        },
+        {
+          "name": "Framework integration",
+          "description": "Готовая интеграция с агентными фреймворками: LangChain и CrewAI из коробки, stateful-агенты без кастомного кода"
+        }
+      ]
+    },
+    {
+      "full_name": "mem0ai/mem0",
+      "name": "Mem0",
+      "url": "https://github.com/mem0ai/mem0",
+      "stars": 62214,
+      "language": "Python",
+      "license": "Apache-2.0",
+      "created_at": "2023-06-20",
+      "updated_at": "2026-07-31",
+      "topics": ["ai-agents", "long-term-memory", "memory", "memory-management", "rag", "state-management", "chatbots"],
+      "summary": "Универсальный слой памяти для AI-агентов (62k+ звёзд): управление долгосрочной памятью (add/search/update), memory-графы, интеграция с LangChain, LlamaIndex, CrewAI, OpenAI; де-факто стандарт памяти агентов.",
+      "branches": [
+        {
+          "name": "Memory management ops",
+          "description": "Полный жизненный цикл памяти: добавление, поиск, обновление и удаление записей + memory-графы связей между фактами"
+        },
+        {
+          "name": "RAG + state management",
+          "description": "Память как дополнение RAG-пайплайнов и управление состоянием: персонализация чат-ботов, stateful-агенты, интеграции с фреймворками"
+        }
+      ]
+    }
+  ]
+}

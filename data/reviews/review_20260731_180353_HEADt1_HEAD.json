@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-07-31T18:03:53.480225",
+  "commit_ref": "HEAD~1..HEAD",
+  "findings": {
+    "danger": [
+      {
+        "pattern": "except Exception — лучше конкретнее",
+        "line": "+        except Exception:"
+      },
+      {
+        "pattern": "except Exception — лучше конкретнее",
+        "line": "+                except Exception:"
+      }
+    ],
+    "good": [
+      "type hints",
+      "docstring"
+    ],
+    "syntax_errors": [],
+    "stats": {
+      "py_files_changed": [
+        "agi_session_bridge.py"
+      ],
+      "added_lines": 120,
+      "deleted_lines": 23
+    },
+    "verdict": "🟢 OK — есть замечания"
+  }
+}
