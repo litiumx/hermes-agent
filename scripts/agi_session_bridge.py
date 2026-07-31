@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """agi_session_bridge.py — улучшенное хранение контекста между рестартами.
 
-Фичи:
+Фичи v2 (SQLite-first):
+- SQLite через agi_context_store (WAL, дедупликация, aging, атомарность)
+- JSON fallback при недоступности SQLite
 - Ротация: хранит последние K сессий (по умолчанию 10)
 - Диффы: отслеживает что изменилось между сохранениями
 - Авто-сохранение по SIGUSR1
 - Интеграция с proactive_scan.py
 - Человекочитаемый саммари нескольких сессий
 """
-import json, os, signal, time
+import json, os, signal, sys, time
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +18,24 @@ SESSION_DIR = Path("/root/.hermes/session")
 BRIDGE_FILE = SESSION_DIR / "bridge.json"
 HISTORY_DIR = SESSION_DIR / "history"
 MAX_ARCHIVE = 10
-MAX_CONTEXT_SIZE_KB = 64  # макс размер контекста
+MAX_CONTEXT_SIZE_KB = 64
+
+# --- SQLite backend (primary) ---
+_USE_SQLITE = False
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from agi_context_store import (
+        save_context as _sql_save,
+        load_context as _sql_load,
+        add_pending_task as _sql_add_task,
+        remove_pending_task as _sql_rm_task,
+        age_out_tasks as _sql_age_out,
+        get_session_history as _sql_history,
+        get_stats as _sql_stats,
+    )
+    _USE_SQLITE = True
+except ImportError:
+    pass
 
 
 def _ensure_dirs():
@@ -25,11 +44,58 @@ def _ensure_dirs():
 
 
 def save_context(context: dict, snapshot: bool = True) -> str:
-    """Сохранить текущий контекст. Возвращает diff от предыдущего."""
+    """Сохранить текущий контекст. SQLite-first, JSON fallback. Возвращает diff."""
     _ensure_dirs()
-    prev = load_context() if BRIDGE_FILE.exists() else {}
 
-    ctx = {
+    # --- SQLite primary path ---
+    if _USE_SQLITE:
+        try:
+            _sql_save(context)
+            prev = load_context()
+            diff = _compute_diff(prev, context) if prev else {}
+            return _format_diff(diff) if diff else "no changes (SQLite)"
+        except Exception as e:
+            pass  # fall through to JSON
+
+    # --- JSON fallback ---
+    prev = load_context() if BRIDGE_FILE.exists() else {}
+    ctx = _normalize_context(context)
+
+    diff = _compute_diff(prev, ctx)
+
+    with open(BRIDGE_FILE, "w") as f:
+        json.dump(ctx, f, indent=2, ensure_ascii=False)
+
+    if snapshot and ctx.get("session_phase") in ("complete", "interrupted", "error"):
+        _archive_snapshot(ctx)
+
+    return _format_diff(diff) if diff else "no changes (JSON)"
+
+
+def load_context() -> dict:
+    """Загрузить контекст предыдущей сессии. SQLite-first, JSON fallback."""
+    _ensure_dirs()
+
+    if _USE_SQLITE:
+        try:
+            ctx = _sql_load()
+            if ctx:
+                return ctx
+        except Exception:
+            pass
+
+    # JSON fallback
+    if BRIDGE_FILE.exists():
+        try:
+            return json.loads(BRIDGE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _normalize_context(context: dict) -> dict:
+    """Привести контекст к единому формату (для JSON fallback)."""
+    return {
         "timestamp": time.time(),
         "last_task": context.get("last_task", ""),
         "active_projects": context.get("active_projects", []),
@@ -42,29 +108,6 @@ def save_context(context: dict, snapshot: bool = True) -> str:
         "session_phase": context.get("session_phase", "unknown"),
         "tool_call_count": context.get("tool_call_count", 0),
     }
-
-    # Вычисляем diff
-    diff = _compute_diff(prev, ctx)
-
-    with open(BRIDGE_FILE, "w") as f:
-        json.dump(ctx, f, indent=2, ensure_ascii=False)
-
-    # Сохраняем снимок в историю
-    if snapshot and ctx.get("session_phase") in ("complete", "interrupted", "error"):
-        _archive_snapshot(ctx)
-
-    return _format_diff(diff) if diff else "no changes"
-
-
-def load_context() -> dict:
-    """Загрузить контекст предыдущей сессии."""
-    _ensure_dirs()
-    if BRIDGE_FILE.exists():
-        try:
-            return json.loads(BRIDGE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
 
 
 def _compute_diff(prev: dict, curr: dict) -> dict:
@@ -177,10 +220,64 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "save":
-        # Пример: python3 agi_session_bridge.py save '{"last_task":"test","session_phase":"complete"}'
         data = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
         print(save_context(data))
     elif len(sys.argv) > 1 and sys.argv[1] == "summary":
         print(get_session_summary())
+    elif len(sys.argv) > 1 and sys.argv[1] == "add-task":
+        task = " ".join(sys.argv[2:])
+        if task:
+            if _USE_SQLITE:
+                ok = _sql_add_task(task)
+                print(f"{'Added' if ok else 'Already exists'} (SQLite): {task}")
+            else:
+                ctx = load_context()
+                ctx.setdefault("pending_tasks", []).append(task)
+                save_context(ctx, snapshot=False)
+                print(f"Added (JSON): {task}")
+    elif len(sys.argv) > 1 and sys.argv[1] == "rm-task":
+        task = " ".join(sys.argv[2:])
+        if task:
+            if _USE_SQLITE:
+                ok = _sql_rm_task(task)
+                print(f"{'Removed' if ok else 'Not found'} (SQLite): {task}")
+            else:
+                ctx = load_context()
+                tasks = ctx.get("pending_tasks", [])
+                if task in tasks:
+                    tasks.remove(task)
+                    save_context(ctx, snapshot=False)
+                    print(f"Removed (JSON): {task}")
+                else:
+                    print(f"Not found: {task}")
+    elif len(sys.argv) > 1 and sys.argv[1] == "age-out":
+        if _USE_SQLITE:
+            n = _sql_age_out()
+            print(f"Aged out {n} tasks (SQLite)")
+        else:
+            print("age-out requires SQLite backend")
+    elif len(sys.argv) > 1 and sys.argv[1] == "history":
+        hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+        if _USE_SQLITE:
+            for h in _sql_history(hours):
+                ts = time.strftime("%d.%m %H:%M", time.localtime(h["timestamp"]))
+                print(f"[{ts}] [{h['session_phase']}] {h['last_task'][:60]}")
+        else:
+            snapshots = sorted(HISTORY_DIR.glob("snapshot_*.json"), reverse=True)
+            for s in snapshots:
+                try:
+                    data = json.loads(s.read_text())
+                    ts = time.strftime("%d.%m %H:%M", time.localtime(data.get("timestamp", 0)))
+                    print(f"[{ts}] [{data.get('session_phase', '?')}] {data.get('last_task', '?')[:60]}")
+                except Exception:
+                    pass
+    elif len(sys.argv) > 1 and sys.argv[1] == "stats":
+        if _USE_SQLITE:
+            stats = _sql_stats()
+            print(f"Backend: SQLite | Sessions: {stats['total_sessions']} | Tasks: {stats['active_tasks']} | DB: {stats['db_size_kb']}KB")
+        else:
+            print("Backend: JSON | stats unavailable (use 'summary')")
+    elif len(sys.argv) > 1 and sys.argv[1] == "backend":
+        print(f"Current backend: {'SQLite' if _USE_SQLITE else 'JSON (fallback)'}")
     else:
         print(get_session_summary())
