@@ -9,3 +9,14 @@ cache/
 logs/
 cron/
 *.pyc
+.hermes_history
+.mcp-discovery.lock
+.npm_lock_hash_*
+.restart_*
+.skills_prompt_*
+ROUTING_POOL.json
+SOUL.md.v*-backup
+agents/
+auth.json
+auth.lock
+artifacts/
