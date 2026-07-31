@@ -20,3 +20,12 @@ agents/
 auth.json
 auth.lock
 artifacts/
+bin/
+browser-bridge.py
+browser-bridge.sh
+*.bak
+*.corrupt*
+config.yaml.pre-docker
+config.yaml.v1-backup
+.update_check
+channel_directory.json

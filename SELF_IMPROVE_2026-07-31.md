@@ -1,11 +1,11 @@
-# 🧬 Само-улучшение — 30.07.2026 22:00 MSK
+# 🧬 Само-улучшение — 31.07.2026 22:00 MSK
 
 ## Найденные паттерны ошибок
 | Ошибка | Частота |
 |--------|---------|
 | file.*not found|No such file | 2845 |
-| gateway instance is already running | 1759 |
-| timeout | 116 |
+| gateway instance is already running | 1921 |
+| timeout | 128 |
 | MCP.*not.*responding|MCP.*disconnect | 26 |
 | rate_limit | 1 |
 
