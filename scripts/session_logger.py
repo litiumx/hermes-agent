@@ -187,6 +187,10 @@ if __name__ == "__main__":
             n = import_from_wal(dir_arg)
             print(f"Импортировано сессий: {n}")
         elif action == "search":
+            # Авто-синхронизация с WAL перед поиском, чтобы данные были свежими
+            n_imported = import_from_wal()
+            if n_imported:
+                print(f"Синхронизировано сессий из WAL: {n_imported}")
             q = sys.argv[2] if len(sys.argv) > 2 else ""
             results = search_sessions(q)
             if results:
