@@ -52,7 +52,7 @@ def save_context(context: dict, snapshot: bool = True) -> str:
         try:
             prev = load_context()  # ДО записи — иначе diff всегда пуст
             _sql_save(context)
-            diff = _compute_diff(prev, _normalize_context(context)) if prev else {}
+            diff = _compute_diff(prev, _canonicalize(context))
             return _format_diff(diff) if diff else "no changes (SQLite)"
         except Exception as e:
             pass  # fall through to JSON
@@ -72,48 +72,73 @@ def save_context(context: dict, snapshot: bool = True) -> str:
     return _format_diff(diff) if diff else "no changes (JSON)"
 
 
+_DIFF_IGNORE = {"timestamp"}  # регенерируется при каждом сохранении — не информативен в диффе
+
+
 def load_context() -> dict:
-    """Загрузить контекст предыдущей сессии. SQLite-first, JSON fallback."""
+    """Загрузить контекст предыдущей сессии. SQLite-first, JSON fallback.
+
+    Возвращает КАНОНИЧЕСКИЙ контекст (через _canonicalize) — оба бэкенда
+    отдают одинаковый набор ключей, чтобы дифф не шумел на id/swarm_size.
+    """
     _ensure_dirs()
 
     if _USE_SQLITE:
         try:
             ctx = _sql_load()
             if ctx:
-                return ctx
+                return _canonicalize(ctx)
         except Exception:
             pass
 
     # JSON fallback
     if BRIDGE_FILE.exists():
         try:
-            return json.loads(BRIDGE_FILE.read_text())
+            return _canonicalize(json.loads(BRIDGE_FILE.read_text()))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
-def _normalize_context(context: dict) -> dict:
-    """Привести контекст к единому формату (для JSON fallback)."""
+def _canonicalize(context: dict) -> dict:
+    """Единый канонический вид контекста из ЛЮБОГО источника.
+
+    Схлопывает различия ключей между SQLite (id/swarm_size/last_known_good
+    int 0|1) и JSON-путем (current_swarm_size/last_known_good_state bool):
+    - swarm_size → current_swarm_size
+    - last_known_good (int) → last_known_good_state (bool)
+    - id — служебный, в дифф не попадает
+    """
     return {
-        "timestamp": time.time(),
+        "timestamp": context.get("timestamp", 0),
         "last_task": context.get("last_task", ""),
         "active_projects": context.get("active_projects", []),
         "last_error": context.get("last_error", ""),
         "user_preferences": context.get("user_preferences", {}),
-        "current_swarm_size": context.get("swarm_size", 3),
+        "current_swarm_size": context.get("current_swarm_size", context.get("swarm_size", 3)),
         "pending_tasks": context.get("pending_tasks", []),
-        "last_known_good_state": context.get("last_known_good", True),
+        "last_known_good_state": bool(
+            context.get("last_known_good_state", context.get("last_known_good", True))
+        ),
         "modified_files": context.get("modified_files", []),
         "session_phase": context.get("session_phase", "unknown"),
         "tool_call_count": context.get("tool_call_count", 0),
     }
 
 
+def _normalize_context(context: dict) -> dict:
+    """Канонический вид + свежий timestamp (для сохранения в JSON)."""
+    ctx = _canonicalize(context)
+    ctx["timestamp"] = time.time()
+    return ctx
+
+
 def _compute_diff(prev: dict, curr: dict) -> dict:
-    """Вычислить разницу между контекстами."""
+    """Вычислить разницу между контекстами (без служебных ключей)."""
     diff = {}
     for key in set(list(prev.keys()) + list(curr.keys())):
+        if key in _DIFF_IGNORE:
+            continue
         pv = prev.get(key)
         cv = curr.get(key)
         if pv != cv:
