@@ -31,6 +31,20 @@ CATEGORY_WEIGHTS = {
 }
 
 MAX_QUEUE_SIZE = 20
+TASK_TIMEOUT = 120  # секунд на выполнение одной задачи
+DEFAULT_COOLDOWN = 6 * 3600  # дефолтные задачи не чаще 1 раза в 6ч
+
+# Маппинг: подстрока задачи → команда исполнения (автономный runner)
+TASK_ACTIONS = [
+    (("proactive scan", "health check"),
+     ["python3", "/root/.hermes/scripts/proactive_scan.py"]),
+    (("self_improve", "self-improvement"),
+     ["python3", "/root/.hermes/scripts/self_improve.py"]),
+    (("curious agent", "research cycle"),
+     ["python3", "/root/.hermes/scripts/agi_curious_agent.py"]),
+    (("pattern",),
+     ["python3", "/root/.hermes/scripts/agi_error_pattern_learner.py", "report"]),
+]
 
 
 def _ensure_dirs():
@@ -137,18 +151,21 @@ def build_queue() -> list[dict]:
             "source": "knowledge_gap",
         })
 
-    # 4. Дефолтные задачи если очередь пуста
-    if not queue:
+    # 4. Дефолтные задачи если очередь пуста (с кулдауном 6ч)
+    history = load_history()
+    last_runs = {h["task"]: h["ts"] for h in history}
+    now = time.time()
+    default_tasks = [
+        ("Run system health check and proactive scan", "improve", 40),
+        ("Run self-improvement cycle (self_improve.py)", "improve", 35),
+    ]
+    for task, cat, prio in default_tasks:
+        if now - last_runs.get(task, 0) < DEFAULT_COOLDOWN:
+            continue
         queue.append({
-            "task": "Run system health check and proactive scan",
-            "category": "improve",
-            "priority": 40,
-            "source": "default",
-        })
-        queue.append({
-            "task": "Run self-improvement cycle (self_improve.py)",
-            "category": "improve",
-            "priority": 35,
+            "task": task,
+            "category": cat,
+            "priority": prio,
             "source": "default",
         })
 
@@ -158,12 +175,13 @@ def build_queue() -> list[dict]:
 
 
 def save_queue(queue: list[dict]):
-    """Сохранить очередь на диск."""
+    """Сохранить очередь на диск (вместе с историей исполнения)."""
     _ensure_dirs()
     data = {
         "updated": time.time(),
         "updated_human": datetime.now(timezone.utc).isoformat(),
         "queue": queue,
+        "history": load_history(),
     }
     QUEUE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -176,6 +194,78 @@ def load_queue() -> list[dict]:
         except Exception:
             pass
     return []
+
+
+def load_history() -> list[dict]:
+    """Загрузить историю выполненных задач (макс 20 записей)."""
+    if QUEUE_FILE.exists():
+        try:
+            return json.loads(QUEUE_FILE.read_text()).get("history", [])[-20:]
+        except Exception:
+            pass
+    return []
+
+
+def _match_action(task: str) -> list[str] | None:
+    """Найти команду исполнения для задачи (по подстрокам)."""
+    task_lower = task.lower()
+    for keywords, cmd in TASK_ACTIONS:
+        if any(k in task_lower for k in keywords):
+            return cmd
+    return None
+
+
+def run_next() -> dict | None:
+    """Исполнить следующую задачу из очереди автономно (если есть маппинг).
+
+    Возвращает dict с результатом или None (задач нет / нет маппинга).
+    """
+    import subprocess
+
+    queue = build_queue()
+    if not queue:
+        return {"task": None, "status": "empty"}
+
+    task_item = queue[0]
+    task_text = task_item["task"]
+    cmd = _match_action(task_text)
+
+    if cmd is None:
+        # Нет скрипта для исполнения — просто фиксируем пропуск
+        result = {"task": task_text, "status": "skipped", "reason": "no action mapping"}
+    else:
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=TASK_TIMEOUT
+            )
+            result = {
+                "task": task_text,
+                "status": "done" if proc.returncode == 0 else "failed",
+                "exit_code": proc.returncode,
+                "output_tail": (proc.stdout or proc.stderr).strip()[-300:],
+            }
+        except subprocess.TimeoutExpired:
+            result = {"task": task_text, "status": "timeout", "exit_code": -1}
+        except Exception as exc:  # noqa: BLE001
+            result = {"task": task_text, "status": "error", "reason": str(exc)}
+
+    # История + удаление выполненной задачи из очереди
+    history = load_history()
+    result["ts"] = time.time()
+    result["ts_human"] = datetime.now(timezone.utc).isoformat()
+    history.append(result)
+    _save_history(history)
+
+    remaining = [t for t in queue if t["task"] != task_text]
+    save_queue(remaining)
+    return result
+
+
+def _save_history(history: list[dict]):
+    """Сохранить историю отдельно (чтобы не потерять при rebuild очереди)."""
+    _ensure_dirs()
+    data = {"updated": time.time(), "history": history[-20:]}
+    QUEUE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def get_next_task() -> dict | None:
@@ -220,6 +310,18 @@ if __name__ == "__main__":
             print(f"NEXT: [{next_task['priority']}] {next_task['task']}")
         else:
             print("NEXT: none")
+    elif len(sys.argv) > 1 and sys.argv[1] == "run-next":
+        result = run_next()
+        if result is None or result.get("task") is None:
+            print("RUN-NEXT: none")
+        else:
+            print(f"RUN-NEXT: [{result['status']}] {result['task']}")
+            if result.get("exit_code") is not None:
+                print(f"  exit_code: {result['exit_code']}")
+            if result.get("reason"):
+                print(f"  reason: {result['reason']}")
+            if result.get("output_tail"):
+                print(f"  output: {result['output_tail']}")
     elif len(sys.argv) > 1 and sys.argv[1] == "report":
         print(get_report())
     else:
