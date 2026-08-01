@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-agi_focus_agent.py — внедрение принципов Focus Agent (arXiv 2601.07190).
+agi_focus_agent.py — внедрение принципов Focus Agent (arXiv 2601.07190)
++ интеграция headroom (63K⭐) — сжатие контента перед сохранением в память.
 
-Идея: LLM-агент сам решает когда консолидировать знания в Knowledge block
-и прунить сырую историю. Slime-mold (Physarum) вдохновение.
+Focus: агент сам решает когда консолидировать знания и прунить историю.
+Headroom: 60-95% меньше токенов на JSON, точность сохранена (GSM8K ±0.000).
 
 Внедрение в Hermes:
-1. Следит за размером сессии (state.db / context)
-2. При достижении порога — сохраняет Knowledge block
-3. Предлагает /compact (ручной триггер остаётся)
-4. Ведёт историю компрессий (как Focus: 6 компрессий на задачу)
-
-Результаты Focus: 22.7% экономия токенов, точность сохранена.
+1. Следит за размером сессии
+2. Сжимает большие JSON/tool-output через headroom перед сохранением
+3. Ведёт Knowledge block + историю компрессий
 """
 import json, os, sqlite3, time, subprocess
 from datetime import datetime
@@ -22,10 +20,26 @@ KB_FILE = HERMES_HOME / "data" / "knowledge_block.json"
 HISTORY_FILE = HERMES_HOME / "data" / "focus_history.json"
 SESSION_STATE = HERMES_HOME / "state.db"
 
-# Пороги (из Focus: активная компрессия лучше пассивной)
-TOKEN_WARN = 0.50   # 50% окна — пора думать о сжатии
-TOKEN_ACT = 0.65    # 65% — действовать
-MAX_COMPRESSIONS_PER_TASK = 6  # как в Focus
+TOKEN_WARN = 0.50
+TOKEN_ACT = 0.65
+MAX_COMPRESSIONS_PER_TASK = 6
+
+def compress_with_headroom(text: str, min_len: int = 500) -> str:
+    """Сжать текст через headroom library. Если <min_len или ошибка — вернуть как есть."""
+    if len(text) < min_len:
+        return text
+    try:
+        from headroom import compress
+        result = compress([{"role": "tool", "tool_call_id": "c", "content": text}])
+        msgs = result.messages if hasattr(result, "messages") else result
+        for m in msgs:
+            if m.get("role") == "tool":
+                c = m.get("content", "")
+                if c and len(c) < len(text):
+                    return c
+        return text
+    except Exception:
+        return text
 
 def get_context_usage():
     """Оценить заполнение контекста из state.db (строки сессии)."""

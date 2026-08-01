@@ -30,6 +30,12 @@
       "content": "arXiv 2601.07190: автономная компрессия контекста, 22.7% экономия токенов, 6 компрессий/задачу",
       "source": "arxiv",
       "timestamp": "2026-08-01T15:44:30.258438"
+    },
+    {
+      "topic": "headroom (63K⭐)",
+      "content": "Компрессия tool outputs перед LLM: 60-95% на JSON, 15-20% на coding agents. Library/Proxy/MCP. Apache-2.0, Python 3.10+",
+      "source": "github",
+      "timestamp": "2026-08-01T15:50:52.633702"
     }
   ]
 }
