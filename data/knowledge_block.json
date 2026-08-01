@@ -1,0 +1,35 @@
+{
+  "created": "2026-08-01T15:44:30.256464",
+  "knowledge": [
+    {
+      "topic": "Memory benchmarks 2026",
+      "content": "LoCoMo (1540 Q), LongMemEval (500 Q), BEAM — стандарты оценки памяти агентов",
+      "source": "octopus",
+      "timestamp": "2026-08-01T15:44:30.256505"
+    },
+    {
+      "topic": "mem0",
+      "content": "Universal memory layer for AI agents, 62K stars",
+      "source": "github-search",
+      "timestamp": "2026-08-01T15:44:30.257007"
+    },
+    {
+      "topic": "headroom",
+      "content": "Compress tool outputs/logs/RAG chunks before LLM — 20% fewer tokens, 63K stars",
+      "source": "github-search",
+      "timestamp": "2026-08-01T15:44:30.257510"
+    },
+    {
+      "topic": "deer-flow",
+      "content": "Long-horizon SuperAgent harness by bytedance, 78K stars",
+      "source": "github-search",
+      "timestamp": "2026-08-01T15:44:30.258054"
+    },
+    {
+      "topic": "Focus Agent",
+      "content": "arXiv 2601.07190: автономная компрессия контекста, 22.7% экономия токенов, 6 компрессий/задачу",
+      "source": "arxiv",
+      "timestamp": "2026-08-01T15:44:30.258438"
+    }
+  ]
+}
