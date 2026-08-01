@@ -21,6 +21,34 @@ KNOWLEDGE_FILE = Path("/root/.hermes/data/curious_knowledge.json")
 BRIDGE_FILE = Path("/root/.hermes/session/bridge.json")
 MAX_FINDINGS = 50  # ротация
 
+# SQLite-first: читаем контекст через agi_session_bridge (канонический вид),
+# JSON bridge.json — только fallback
+_USE_BRIDGE = False
+try:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from agi_session_bridge import load_context as _bridge_load
+    _USE_BRIDGE = True
+except ImportError:
+    pass
+
+
+def _load_bridge_context() -> dict:
+    """Контекст сессии: SQLite-first через agi_session_bridge, JSON fallback."""
+    if _USE_BRIDGE:
+        try:
+            ctx = _bridge_load()
+            if ctx:
+                return ctx
+        except Exception:
+            pass
+    if BRIDGE_FILE.exists():
+        try:
+            return json.loads(BRIDGE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
 # Темы для авто-исследования при простое
 DEFAULT_TOPICS = [
     "AI agent autonomous self-improvement best practices 2026",
@@ -62,30 +90,27 @@ def save_knowledge(data: dict):
 
 
 def get_active_topics() -> list[str]:
-    """Извлечь активные темы из bridge-контекста."""
+    """Извлечь активные темы из bridge-контекста (SQLite-first)."""
     topics = set()
 
-    if BRIDGE_FILE.exists():
-        try:
-            ctx = json.loads(BRIDGE_FILE.read_text())
-            last_task = ctx.get("last_task", "")
-            if last_task:
-                for trigger in RESEARCH_TRIGGERS:
-                    if trigger.lower() in last_task.lower():
-                        topics.add(last_task[:100])
+    ctx = _load_bridge_context()
+    if ctx:
+        last_task = ctx.get("last_task", "")
+        if last_task:
+            for trigger in RESEARCH_TRIGGERS:
+                if trigger.lower() in last_task.lower():
+                    topics.add(last_task[:100])
 
-            pending = ctx.get("pending_tasks", [])
-            for task in pending[:3]:
-                topics.add(task[:100])
+        pending = ctx.get("pending_tasks", [])
+        for task in pending[:3]:
+            topics.add(task[:100])
 
-            last_error = ctx.get("last_error", "")
-            if last_error:
-                # Извлекаем ключевые слова из ошибки
-                words = [w for w in last_error.split() if len(w) > 3][:5]
-                if words:
-                    topics.add(" ".join(words))
-        except Exception:
-            pass
+        last_error = ctx.get("last_error", "")
+        if last_error:
+            # Извлекаем ключевые слова из ошибки
+            words = [w for w in last_error.split() if len(w) > 3][:5]
+            if words:
+                topics.add(" ".join(words))
 
     # Если не нашли — используем дефолтные
     if not topics:
