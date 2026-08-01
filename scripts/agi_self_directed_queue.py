@@ -20,6 +20,34 @@ PATTERNS_FILE = Path("/root/.hermes/data/error_patterns.json")
 KNOWLEDGE_FILE = Path("/root/.hermes/data/curious_knowledge.json")
 QUEUE_FILE = Path("/root/.hermes/data/task_queue.json")
 
+# SQLite-first: контекст через agi_session_bridge (канонический вид),
+# JSON bridge.json — только fallback
+_USE_BRIDGE = False
+try:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from agi_session_bridge import load_context as _bridge_load
+    _USE_BRIDGE = True
+except ImportError:
+    pass
+
+
+def _load_bridge_context() -> dict:
+    """Контекст сессии: SQLite-first через agi_session_bridge, JSON fallback."""
+    if _USE_BRIDGE:
+        try:
+            ctx = _bridge_load()
+            if ctx:
+                return ctx
+        except Exception:
+            pass
+    if BRIDGE_FILE.exists():
+        try:
+            return json.loads(BRIDGE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
 # Категории и их веса
 CATEGORY_WEIGHTS = {
     "fix": 100,      # Исправление ошибок — высший приоритет
@@ -55,15 +83,12 @@ def load_state() -> dict:
     """Собрать состояние из всех источников."""
     state = {"pending": [], "risks": [], "knowledge_gaps": [], "errors_active": []}
 
-    # Задачи из bridge
-    if BRIDGE_FILE.exists():
-        try:
-            bridge = json.loads(BRIDGE_FILE.read_text())
-            state["pending"] = bridge.get("pending_tasks", [])
-            state["last_task"] = bridge.get("last_task", "")
-            state["last_error"] = bridge.get("last_error", "")
-        except Exception:
-            pass
+    # Задачи из bridge (SQLite-first)
+    bridge = _load_bridge_context()
+    if bridge:
+        state["pending"] = bridge.get("pending_tasks", [])
+        state["last_task"] = bridge.get("last_task", "")
+        state["last_error"] = bridge.get("last_error", "")
 
     # Риски из error pattern learner
     if PATTERNS_FILE.exists():
