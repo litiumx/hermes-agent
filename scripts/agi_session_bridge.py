@@ -50,9 +50,9 @@ def save_context(context: dict, snapshot: bool = True) -> str:
     # --- SQLite primary path ---
     if _USE_SQLITE:
         try:
+            prev = load_context()  # ДО записи — иначе diff всегда пуст
             _sql_save(context)
-            prev = load_context()
-            diff = _compute_diff(prev, context) if prev else {}
+            diff = _compute_diff(prev, _normalize_context(context)) if prev else {}
             return _format_diff(diff) if diff else "no changes (SQLite)"
         except Exception as e:
             pass  # fall through to JSON
