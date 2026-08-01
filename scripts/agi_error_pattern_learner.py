@@ -96,7 +96,12 @@ def _active_patterns(data: dict) -> dict:
 
 
 def scan_logs(data: dict, max_lines=2000) -> dict:
-    """Сканирует логи, извлекает паттерны ошибок."""
+    """Сканирует логи, извлекает паттерны ошибок.
+
+    Считает СТРОКИ с ошибкой (не совпадения): если строка содержит два
+    альтернативных матча паттерна (FileNotFoundError + No such file...),
+    она учитывается один раз.
+    """
     matches = Counter()
     files_to_scan = []
     if SUPERVISOR_LOG.exists():
@@ -108,14 +113,15 @@ def scan_logs(data: dict, max_lines=2000) -> dict:
     if SESSION_DIR.exists():
         files_to_scan.extend(sorted(SESSION_DIR.glob("session_*.json"), reverse=True)[:5])
 
-    pats = _active_patterns(data)
+    compiled = {name: re.compile(p, re.IGNORECASE) for name, p in _active_patterns(data).items()}
     for f in files_to_scan:
         if f == SUPERVISOR_LOG:
             content = str(f.read_text())[-max_lines * 200:]
         else:
             content = _tail_text(f)
-        for name, pattern in pats.items():
-            found = len(re.findall(pattern, content, re.IGNORECASE))
+        lines = content.splitlines()
+        for name, rx in compiled.items():
+            found = sum(1 for line in lines if rx.search(line))
             if found:
                 matches[name] += found
     return dict(matches.most_common())
