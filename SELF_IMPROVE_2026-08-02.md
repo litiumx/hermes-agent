@@ -35,3 +35,33 @@
 
 ---
 *Сгенерировано AGI cron 5c8fb71aedfc*
+
+---
+
+## Сделано: agi_gateway_guard.py — защитник от двойных запусков gateway
+
+**Проблема (из данных error_pattern_learner):** `gateway_already_running` 2220× в
+logs/errors.log — повторные `hermes gateway run` БЕЗ `--replace` при живом инстансе
+(31.07, PID 2577566). Дополнительно: `gateway.pid`/`gateway.lock` — JSON с ключом
+`pid` внутри, НЕ plain PID (наивный `kill $(cat gateway.pid)` сломал бы).
+
+**Что делает (scripts/agi_gateway_guard.py):**
+- `status` — проверяет gateway.pid/gateway.lock: жив ли PID, совпадает ли argv
+  (защита от PID reuse), битый JSON → проблема. Exit 1 = найдены проблемы.
+- `scan` — все hermes-gateway процессы из /proc, сортировка по start, выявление дублей.
+- `clean-stale` — удаляет stale lock/pid (PID мёртв или JSON битый), .bak перед удалением.
+- `self-test` — синтетический тест 6 веток в temp (реальное состояние не трогает).
+
+**Тесты:**
+- Синтаксис: `compile()` OK
+- Self-test: 6/6 веток (good/stale/broken/missing/alive/PID-reuse), exit 0
+- `status` на реальной системе: gateway.pid OK (PID 2533595 жив, argv совпадает), exit 0
+- `scan`: 1 процесс, дублей нет, exit 0
+
+**Как использовать:** перед рестартом gateway — `python3 scripts/agi_gateway_guard.py status`;
+при exit 1: `clean-stale` (если stale) или kill лишних процессов по `scan`.
+
+**Следующие приоритеты:**
+- mcp_crash 1970× (notebooklm ClosedResourceError) — keepalive-монитор для MCP
+- auth_failure 225× — проверить ключи (GitHub token classic, DeepSeek)
+- Добавить agi_gateway_guard в proactive_scan.py как раннюю проверку
