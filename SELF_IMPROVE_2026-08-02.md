@@ -65,3 +65,26 @@ logs/errors.log — повторные `hermes gateway run` БЕЗ `--replace` �
 - mcp_crash 1970× (notebooklm ClosedResourceError) — keepalive-монитор для MCP
 - auth_failure 225× — проверить ключи (GitHub token classic, DeepSeek)
 - Добавить agi_gateway_guard в proactive_scan.py как раннюю проверку
+
+---
+
+## Сделано: agi_mcp_keepalive.py — keepalive-монитор MCP-серверов
+
+**Проблема (из error_patterns):** mcp_crash — notebooklm keepalive failed
+(ClosedResourceError), paperclip initial connection failed (TaskGroup).
+
+**Что делает (scripts/agi_mcp_keepalive.py):**
+- `scan` — парсит logs/errors.log за 24ч, агрегирует сбои по серверам
+  (conn/keepalive/tool), состояния: ok / degraded / down / crash_loop
+  (crash_loop = ≥3 сбоев за 10 мин), сохраняет в data/mcp_keepalive.json
+- `status` — показывает сохранённое состояние
+- `self-test` — синтетические логи, 4/4 веток, реальные файлы не трогает
+- Exit 1 при down/crash_loop/degraded → готов для proactive_scan.py
+
+**Первый скан (02.08 09:08 UTC):**
+- 🔴 notebooklm down — 96 сбоев за 24ч (keepalive, ClosedResourceError),
+  последний 09:02:59 — активная проблема
+- 🟡 headroom degraded — 3 сбоя (parked after 3 attempts)
+
+**Следующий шаг:** разобраться с notebooklm MCP (переустановка/restart),
+добавить монитор в proactive_scan.py как раннюю проверку.
