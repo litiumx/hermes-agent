@@ -121,7 +121,15 @@ def scan_logs(data: dict, max_lines=2000) -> dict:
             content = _tail_text(f)
         lines = content.splitlines()
         for name, rx in compiled.items():
-            found = sum(1 for line in lines if rx.search(line))
+            if name.startswith("learned_"):
+                # Выученные паттерны хранятся в НОРМАЛИЗОВАННОМ виде (числа→N,
+                # truncated) — матчить их по нормализованной строке, иначе они
+                # никогда не совпадут с сырым логом (фикс 03.08: самообучение
+                # было мёртвым, learned_* не попадали в streaks → не кормили
+                # предсказатель рисков).
+                found = sum(1 for line in lines if rx.search(_normalize_line(line)))
+            else:
+                found = sum(1 for line in lines if rx.search(line))
             if found:
                 matches[name] += found
     return dict(matches.most_common())
