@@ -1,0 +1,450 @@
+{
+  "history": [
+    {
+      "timestamp": 1785618315.2394023,
+      "error_count": 0,
+      "patterns": {}
+    },
+    {
+      "timestamp": 1785618393.5249724,
+      "error_count": 4620,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 225,
+        "request_timeout": 100,
+        "process_killed": 49,
+        "api_rate_limit": 28,
+        "gateway_timeout": 21,
+        "file_not_found": 7
+      }
+    },
+    {
+      "timestamp": 1785618437.6038778,
+      "error_count": 4620,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 225,
+        "request_timeout": 100,
+        "process_killed": 49,
+        "api_rate_limit": 28,
+        "gateway_timeout": 21,
+        "file_not_found": 7
+      }
+    },
+    {
+      "timestamp": 1785618465.1057503,
+      "error_count": 4957,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 225,
+        "request_timeout": 100,
+        "learned_9dd67f56": 55,
+        "learned_51155346": 55,
+        "process_killed": 49,
+        "learned_6f0688e5": 30,
+        "api_rate_limit": 28,
+        "learned_ec4bc06e": 26,
+        "learned_010efb0a": 25,
+        "learned_5baa6558": 25,
+        "learned_6ef4a490": 23,
+        "learned_8133f3a3": 23,
+        "learned_58c91de5": 23,
+        "learned_f70a07b9": 23,
+        "gateway_timeout": 21,
+        "learned_c19f5f68": 8,
+        "file_not_found": 7,
+        "learned_442bff84": 7,
+        "learned_c2b9530b": 7,
+        "learned_81f1b3c3": 7
+      }
+    },
+    {
+      "timestamp": 1785618471.205228,
+      "error_count": 4801,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 225,
+        "request_timeout": 100,
+        "process_killed": 49,
+        "learned_5dae1f09": 30,
+        "api_rate_limit": 28,
+        "learned_61fd7af5": 26,
+        "learned_4aaa7a8f": 22,
+        "gateway_timeout": 21,
+        "learned_0f8c26b2": 19,
+        "learned_5ef2dab7": 19,
+        "learned_33ebc96e": 19,
+        "learned_63d43d32": 18,
+        "learned_69507360": 14,
+        "learned_506b3446": 14,
+        "file_not_found": 7
+      }
+    },
+    {
+      "timestamp": 1785618533.4927828,
+      "error_count": 4957,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 225,
+        "request_timeout": 100,
+        "learned_9dd67f56": 55,
+        "learned_51155346": 55,
+        "process_killed": 49,
+        "learned_6f0688e5": 30,
+        "api_rate_limit": 28,
+        "learned_ec4bc06e": 26,
+        "learned_010efb0a": 25,
+        "learned_5baa6558": 25,
+        "learned_6ef4a490": 23,
+        "learned_8133f3a3": 23,
+        "learned_58c91de5": 23,
+        "learned_f70a07b9": 23,
+        "gateway_timeout": 21,
+        "learned_c19f5f68": 8,
+        "file_not_found": 7,
+        "learned_442bff84": 7,
+        "learned_c2b9530b": 7,
+        "learned_81f1b3c3": 7
+      }
+    },
+    {
+      "timestamp": 1785618555.8094094,
+      "error_count": 4771,
+      "patterns": {
+        "gateway_already_running": 2220,
+        "mcp_crash": 1970,
+        "auth_failure": 221,
+        "request_timeout": 100,
+        "process_killed": 49,
+        "learned_5dae1f09": 30,
+        "learned_61fd7af5": 26,
+        "api_rate_limit": 25,
+        "learned_4aaa7a8f": 22,
+        "gateway_timeout": 20,
+        "learned_0f8c26b2": 19,
+        "learned_5ef2dab7": 19,
+        "learned_63d43d32": 18,
+        "learned_69507360": 14,
+        "learned_506b3446": 14,
+        "file_not_found": 4
+      }
+    },
+    {
+      "timestamp": 1785780410.154364,
+      "error_count": 5681,
+      "patterns": {
+        "mcp_crash": 2305,
+        "gateway_already_running": 2220,
+        "auth_failure": 736,
+        "request_timeout": 128,
+        "api_rate_limit": 115,
+        "gateway_timeout": 113,
+        "process_killed": 48,
+        "learned_c19f5f68": 8,
+        "file_not_found": 6,
+        "config_corrupt": 2
+      }
+    },
+    {
+      "timestamp": 1785823736.6367564,
+      "error_count": 5769,
+      "patterns": {
+        "mcp_crash": 2331,
+        "gateway_already_running": 2220,
+        "auth_failure": 738,
+        "request_timeout": 166,
+        "gateway_timeout": 144,
+        "api_rate_limit": 120,
+        "process_killed": 43,
+        "file_not_found": 5,
+        "config_corrupt": 2
+      }
+    },
+    {
+      "timestamp": 1785824040.6734378,
+      "error_count": 5806,
+      "patterns": {
+        "mcp_crash": 2329,
+        "gateway_already_running": 2220,
+        "auth_failure": 738,
+        "request_timeout": 162,
+        "gateway_timeout": 145,
+        "api_rate_limit": 121,
+        "process_killed": 43,
+        "learned_7aaf27b2": 41,
+        "file_not_found": 5,
+        "config_corrupt": 2
+      }
+    },
+    {
+      "timestamp": 1785866708.7896898,
+      "error_count": 5909,
+      "patterns": {
+        "mcp_crash": 2379,
+        "gateway_already_running": 2220,
+        "auth_failure": 797,
+        "request_timeout": 170,
+        "gateway_timeout": 163,
+        "api_rate_limit": 130,
+        "process_killed": 43,
+        "file_not_found": 5,
+        "config_corrupt": 2
+      }
+    },
+    {
+      "timestamp": 1785866762.6510227,
+      "error_count": 5949,
+      "patterns": {
+        "mcp_crash": 2379,
+        "gateway_already_running": 2220,
+        "auth_failure": 797,
+        "request_timeout": 170,
+        "gateway_timeout": 165,
+        "api_rate_limit": 130,
+        "process_killed": 43,
+        "learned_7aaf27b2": 38,
+        "file_not_found": 5,
+        "config_corrupt": 2
+      }
+    }
+  ],
+  "streaks": {
+    "gateway_already_running": 9,
+    "mcp_crash": 9,
+    "auth_failure": 9,
+    "request_timeout": 9,
+    "learned_9dd67f56": 0,
+    "learned_51155346": 0,
+    "process_killed": 9,
+    "learned_6f0688e5": 0,
+    "api_rate_limit": 9,
+    "learned_ec4bc06e": 0,
+    "learned_010efb0a": 0,
+    "learned_5baa6558": 0,
+    "learned_6ef4a490": 0,
+    "learned_8133f3a3": 0,
+    "learned_58c91de5": 0,
+    "learned_f70a07b9": 0,
+    "gateway_timeout": 9,
+    "learned_c19f5f68": 0,
+    "file_not_found": 9,
+    "learned_442bff84": 0,
+    "learned_c2b9530b": 0,
+    "learned_81f1b3c3": 0,
+    "learned_5dae1f09": 0,
+    "learned_61fd7af5": 0,
+    "learned_4aaa7a8f": 0,
+    "learned_0f8c26b2": 0,
+    "learned_5ef2dab7": 0,
+    "learned_33ebc96e": 0,
+    "learned_63d43d32": 0,
+    "learned_69507360": 0,
+    "learned_506b3446": 0,
+    "config_corrupt": 5,
+    "learned_7aaf27b2": 1
+  },
+  "learned_patterns": [
+    {
+      "name": "learned_a734ef28",
+      "pattern": "Error: N validation errors for JSONRPCMessage",
+      "occurrences": 59,
+      "first_seen": 1785866789.9270852
+    },
+    {
+      "name": "learned_33ebc96e",
+      "pattern": "error\n  Field required [type=missing, input_value={'message': 'Unauthorized...Ma",
+      "occurrences": 59,
+      "first_seen": 1785866789.927087
+    },
+    {
+      "name": "learned_ffaf7abc",
+      "pattern": "error (attempt N/N); retrying same provider after N.Ns before fallback: Request ",
+      "occurrences": 24,
+      "first_seen": 1785866789.9271128
+    },
+    {
+      "name": "learned_5d2eec1c",
+      "pattern": "check_FN check_FN returned False; dependent tools wi",
+      "occurrences": 23,
+      "first_seen": 1785866789.9271145
+    },
+    {
+      "name": "learned_4610b331",
+      "pattern": "Tool skill_manage returned error (N.Ns): {\"success\": false, \"e",
+      "occurrences": 20,
+      "first_seen": 1785866789.9271178
+    },
+    {
+      "name": "learned_f7fc2ac1",
+      "pattern": "Tool skill_manage returned error (N.Ns): {\"success\": false, \"error\": \"Ref",
+      "occurrences": 20,
+      "first_seen": 1785866789.92712
+    },
+    {
+      "name": "learned_ae5b986a",
+      "pattern": "check_FN check_FN returned False; dependent tools will b",
+      "occurrences": 20,
+      "first_seen": 1785866789.9271216
+    },
+    {
+      "name": "learned_fcc6afbb",
+      "pattern": "Retrying API call in N.Ns (attempt N/N) thread=Thread-N",
+      "occurrences": 20,
+      "first_seen": 1785866789.9271235
+    },
+    {
+      "name": "learned_3fc2b0cb",
+      "pattern": "agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for Ns (payment ",
+      "occurrences": 19,
+      "first_seen": 1785866789.927125
+    },
+    {
+      "name": "learned_5dae1f09",
+      "pattern": "agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authenticatio",
+      "occurrences": 19,
+      "first_seen": 1785866789.9271266
+    },
+    {
+      "name": "learned_bdc14184",
+      "pattern": "agent.auxiliary_client: Auxiliary: marking nous unhealthy for Ns (payment / cred",
+      "occurrences": 19,
+      "first_seen": 1785866789.9271283
+    },
+    {
+      "name": "learned_47f88e24",
+      "pattern": "tui_gateway.server: wake.start(gui): failed to start listener: Failed to open th",
+      "occurrences": 19,
+      "first_seen": 1785866789.9271297
+    },
+    {
+      "name": "learned_024f875d",
+      "pattern": "Tool skill_manage returned error (N.Ns): {\"success\": false, \"error\": \"Des",
+      "occurrences": 19,
+      "first_seen": 1785866789.9271317
+    },
+    {
+      "name": "learned_d2c6ed49",
+      "pattern": "tools.wake_word: wake word: failed to open microphone: Error querying device -N",
+      "occurrences": 18,
+      "first_seen": 1785866789.927133
+    },
+    {
+      "name": "learned_2e62ea51",
+      "pattern": "Docker storage driver does not support per-container disk",
+      "occurrences": 18,
+      "first_seen": 1785866789.927135
+    },
+    {
+      "name": "learned_1d3641e3",
+      "pattern": "hermes.security_audit: Security posture audit found N issue(s) — review your dep",
+      "occurrences": 15,
+      "first_seen": 1785866789.9271367
+    },
+    {
+      "name": "learned_a6d3aa65",
+      "pattern": "hermes.security_audit:   [security N/N] Running as ROOT. The agent's terminal/fi",
+      "occurrences": 15,
+      "first_seen": 1785866789.9271383
+    },
+    {
+      "name": "learned_63d43d32",
+      "pattern": "agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal ",
+      "occurrences": 15,
+      "first_seen": 1785866789.9271398
+    },
+    {
+      "name": "learned_caebfd3c",
+      "pattern": "tui_gateway.server: wake.start(gui): not available — Microphone capture needs so",
+      "occurrences": 14,
+      "first_seen": 1785866789.927142
+    },
+    {
+      "name": "learned_e3434e03",
+      "pattern": "Error: Skipped to prevent unintended spend: global inference config drifted sinc",
+      "occurrences": 14,
+      "first_seen": 1785866789.9271433
+    }
+  ],
+  "last_update": 1785866762.6510227,
+  "trends": {
+    "gateway_already_running": "stable",
+    "mcp_crash": "stable",
+    "auth_failure": "stable",
+    "request_timeout": "stable",
+    "process_killed": "stable",
+    "api_rate_limit": "stable",
+    "gateway_timeout": "stable",
+    "file_not_found": "stable",
+    "config_corrupt": "rising"
+  },
+  "risks": [
+    {
+      "risk": "high",
+      "pattern": "gateway_already_running",
+      "trend": "stable",
+      "message": "Паттерн 'gateway_already_running' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Убить старый gateway (gateway.pid) перед рестартом"
+    },
+    {
+      "risk": "high",
+      "pattern": "mcp_crash",
+      "trend": "stable",
+      "message": "Паттерн 'mcp_crash' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Перезапустить MCP-сервер"
+    },
+    {
+      "risk": "high",
+      "pattern": "auth_failure",
+      "trend": "stable",
+      "message": "Паттерн 'auth_failure' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Проверить API-ключи во всех .env"
+    },
+    {
+      "risk": "high",
+      "pattern": "request_timeout",
+      "trend": "stable",
+      "message": "Паттерн 'request_timeout' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Проверить сеть/таймауты API"
+    },
+    {
+      "risk": "high",
+      "pattern": "process_killed",
+      "trend": "stable",
+      "message": "Паттерн 'process_killed' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Проверить OOM/память"
+    },
+    {
+      "risk": "high",
+      "pattern": "api_rate_limit",
+      "trend": "stable",
+      "message": "Паттерн 'api_rate_limit' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Увеличить backoff или подождать"
+    },
+    {
+      "risk": "high",
+      "pattern": "gateway_timeout",
+      "trend": "stable",
+      "message": "Паттерн 'gateway_timeout' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Проверить соответствующие сервисы."
+    },
+    {
+      "risk": "high",
+      "pattern": "file_not_found",
+      "trend": "stable",
+      "message": "Паттерн 'file_not_found' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.",
+      "suggestion": "Проверить пути в скриптах/конфигах — файл не найден"
+    },
+    {
+      "risk": "high",
+      "pattern": "config_corrupt",
+      "trend": "rising",
+      "message": "Паттерн 'config_corrupt' встречался в 5 последних сканах (тренд: rising). Вероятен повтор.",
+      "suggestion": "Восстановить config.yaml из бэкапа"
+    }
+  ]
+}

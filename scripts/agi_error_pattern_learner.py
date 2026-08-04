@@ -274,6 +274,13 @@ def update_patterns() -> dict:
         added = len(merged) - prev_total
         data["learned_patterns"] = merged
 
+    # Тренды и риски персистим в файл — потребители (self_directed_queue)
+    # читают ГОТОВЫЙ trend-aware результат, не скатываясь в наивный
+    # streak-логик (фикс: очередь всё ещё плодила 8 одинаковых задач
+    # "streak: 7", хотя predict_risks уже умел тренды).
+    risks = predict_risks(data)
+    data["trends"] = {r["pattern"]: r["trend"] for r in risks if r.get("pattern")}
+    data["risks"] = risks
     data["last_update"] = timestamp
     with open(PATTERNS_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -282,7 +289,7 @@ def update_patterns() -> dict:
         "status": "ok",
         "matches": matches,
         "streaks": streaks,
-        "risks": predict_risks(data),
+        "risks": risks,
         "learned_total": len(data.get("learned_patterns", [])),
         "learned_new": added,
     }

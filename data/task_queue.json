@@ -1,0 +1,98 @@
+{
+  "updated": 1785866789.9531643,
+  "updated_human": "2026-08-04T18:06:29.953168+00:00",
+  "queue": [
+    {
+      "task": "Investigate and fix pattern: mcp_crash (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: auth_failure (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: request_timeout (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: process_killed (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: api_rate_limit (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: gateway_timeout (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: file_not_found (trend: stable)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Investigate and fix pattern: config_corrupt (trend: rising)",
+      "category": "fix",
+      "priority": 100,
+      "source": "risk"
+    },
+    {
+      "task": "Run curious agent research cycle",
+      "category": "research",
+      "priority": 50,
+      "source": "knowledge_gap"
+    },
+    {
+      "task": "Run system health check and proactive scan",
+      "category": "improve",
+      "priority": 40,
+      "source": "default"
+    },
+    {
+      "task": "Run self-improvement cycle (self_improve.py)",
+      "category": "improve",
+      "priority": 35,
+      "source": "default"
+    }
+  ],
+  "history": [
+    {
+      "task": "Run system health check and proactive scan",
+      "status": "done",
+      "exit_code": 0,
+      "output_tail": "щая сессия:\n  Последняя задача: session_bridge cron\n  Активные проекты: FinForge, Hermes, Server\n  🕐 Сессия была: 01.08 09:00\n\n🧠 Системный скан\n\n  🟢  Disk 81% — 12G свободно\n  🟢  Gateway активен\n  🟢  MCP: 6/7 работают\n  🟢  Memory: 101 фактов\n  🟢  Gateway лог: 0 ошибок\n\n✅ Система в норме. Что делаем?",
+      "ts": 1785575283.0765128,
+      "ts_human": "2026-08-01T09:08:03.076520+00:00"
+    },
+    {
+      "task": "Run system health check and proactive scan",
+      "status": "done",
+      "exit_code": 0,
+      "output_tail": "щая сессия:\n  Последняя задача: session_bridge cron\n  Активные проекты: FinForge, Hermes, Server\n  🕐 Сессия была: 01.08 15:00\n\n🧠 Системный скан\n\n  🟢  Disk 81% — 12G свободно\n  🟢  Gateway активен\n  🟢  MCP: 6/7 работают\n  🟢  Memory: 104 фактов\n  🟢  Gateway лог: 0 ошибок\n\n✅ Система в норме. Что делаем?",
+      "ts": 1785597082.9292886,
+      "ts_human": "2026-08-01T15:11:22.929295+00:00"
+    },
+    {
+      "task": "Investigate and fix pattern: gateway_already_running (trend: stable)",
+      "status": "done",
+      "exit_code": 0,
+      "output_tail": "терн 'file_not_found' встречался в 9 последних сканах (тренд: stable). Вероятен повтор.\n      → Проверить пути в скриптах/конфигах — файл не найден\n    HIGH (rising): Паттерн 'config_corrupt' встречался в 5 последних сканах (тренд: rising). Вероятен повтор.\n      → Восстановить config.yaml из бэкапа",
+      "ts": 1785866789.9518988,
+      "ts_human": "2026-08-04T18:06:29.951936+00:00"
+    }
+  ]
+}

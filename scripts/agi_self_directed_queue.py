@@ -90,17 +90,32 @@ def load_state() -> dict:
         state["last_task"] = bridge.get("last_task", "")
         state["last_error"] = bridge.get("last_error", "")
 
-    # Риски из error pattern learner
+    # Риски из error pattern learner — trend-aware (персист из predict_risks)
     if PATTERNS_FILE.exists():
         try:
             patterns = json.loads(PATTERNS_FILE.read_text())
-            for name, count in patterns.get("streaks", {}).items():
-                if count >= 2:
-                    state["risks"].append({
-                        "pattern": name,
-                        "count": count,
-                        "priority": min(count * 30, 100),
-                    })
+            risks = patterns.get("risks", [])
+            if risks:
+                # Новая схема: только HIGH риски (falling→low уже отфильтрован
+                # learner'ом) — не плодим задачи для паттернов, что пропадают.
+                for r in risks:
+                    if r.get("risk") == "high" and r.get("pattern"):
+                        state["risks"].append({
+                            "pattern": r["pattern"],
+                            "count": patterns.get("streaks", {}).get(r["pattern"], 3),
+                            "trend": r.get("trend", "stable"),
+                            "priority": 100,
+                        })
+            else:
+                # Fallback: старый файл без risks — наивный streak-логик
+                for name, count in patterns.get("streaks", {}).items():
+                    if count >= 3:
+                        state["risks"].append({
+                            "pattern": name,
+                            "count": count,
+                            "trend": "unknown",
+                            "priority": min(count * 30, 100),
+                        })
         except Exception:
             pass
 
@@ -158,10 +173,24 @@ def build_queue() -> list[dict]:
             "source": "pending",
         })
 
-    # 2. Задачи на основе рисков
+    # 2. Задачи на основе рисков — только HIGH, с кулдауном: если задача
+    # уже исполнялась (run_next) в последние DEFAULT_COOLDOWN часов, не
+    # пере-добавляем её в очередь — иначе каждый build_queue плодит дубли.
+    history = load_history()
+    now = time.time()
+    recent_tasks = {
+        h["task"] for h in history
+        if now - h.get("ts", 0) < DEFAULT_COOLDOWN
+    }
     for risk in state.get("risks", []):
+        task_text = (
+            f"Investigate and fix pattern: {risk['pattern']} "
+            f"(trend: {risk.get('trend', '?')})"
+        )
+        if task_text in recent_tasks:
+            continue
         queue.append({
-            "task": f"Investigate and fix pattern: {risk['pattern']} (streak: {risk['count']})",
+            "task": task_text,
             "category": "fix",
             "priority": risk.get("priority", 80),
             "source": "risk",
@@ -177,9 +206,7 @@ def build_queue() -> list[dict]:
         })
 
     # 4. Дефолтные задачи если очередь пуста (с кулдауном 6ч)
-    history = load_history()
     last_runs = {h["task"]: h["ts"] for h in history}
-    now = time.time()
     default_tasks = [
         ("Run system health check and proactive scan", "improve", 40),
         ("Run self-improvement cycle (self_improve.py)", "improve", 35),
