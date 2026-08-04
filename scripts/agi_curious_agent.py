@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import subprocess
 import time
 import hashlib
@@ -120,38 +121,111 @@ def get_active_topics() -> list[str]:
     return list(topics)[:3]
 
 
-def web_search_standalone(query: str) -> list[dict]:
-    """Поиск через DuckDuckGo HTML (без API-ключа, бесплатно)."""
+def _extract_ddg_html(html: str) -> list[dict]:
+    """Парсер html.duckduckgo.com (result__a + result__snippet)."""
+    results = []
+    for match in re.finditer(
+        r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+        html, re.DOTALL
+    ):
+        url = match.group(1)
+        title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        snip = re.search(
+            r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+            html[match.end():match.end() + 2000], re.DOTALL
+        )
+        snippet = re.sub(r'<[^>]+>', '', snip.group(1)).strip() if snip else ""
+        results.append({"title": title, "url": url, "snippet": snippet[:300]})
+    return results
+
+
+def _extract_ddg_lite(html: str) -> list[dict]:
+    """Парсер lite.duckduckgo.com (rel=nofollow ссылки + result-snippet)."""
+    results = []
+    for match in re.finditer(
+        r'<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+        html, re.DOTALL
+    ):
+        url = match.group(1)
+        if url.startswith("//"):
+            url = "https:" + url
+        title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+        snip = re.search(
+            r"class=['\"]result-snippet['\"][^>]*>(.*?)</td>",
+            html[match.end():match.end() + 3000], re.DOTALL
+        )
+        snippet = re.sub(r'<[^>]+>', '', snip.group(1)).strip() if snip else ""
+        results.append({"title": title, "url": url, "snippet": snippet[:300]})
+    return results
+
+
+def _extract_ddg_api(html: str) -> list[dict]:
+    """Парсер api.duckduckgo.com (Instant Answer: AbstractText/RelatedTopics)."""
+    results = []
+    try:
+        data = json.loads(html)
+    except (json.JSONDecodeError, TypeError):
+        return results
+    if data.get("AbstractText") and data.get("AbstractURL"):
+        results.append({
+            "title": data.get("Heading", "Instant Answer"),
+            "url": data["AbstractURL"],
+            "snippet": data["AbstractText"][:300],
+        })
+    for topic in data.get("RelatedTopics", []):
+        if topic.get("Text") and topic.get("FirstURL"):
+            results.append({
+                "title": topic.get("Text", "")[:80],
+                "url": topic["FirstURL"],
+                "snippet": topic["Text"][:300],
+            })
+        elif topic.get("Topics"):
+            for sub in topic["Topics"]:
+                if sub.get("Text") and sub.get("FirstURL"):
+                    results.append({
+                        "title": sub.get("Text", "")[:80],
+                        "url": sub["FirstURL"],
+                        "snippet": sub["Text"][:300],
+                    })
+    return results
+
+
+def web_search_standalone(query: str, source: str = "auto") -> list[dict]:
+    """Поиск без API-ключа (бесплатно) с fallback-цепочкой.
+
+    Цепочка: html.duckduckgo.com → lite.duckduckgo.com → api.duckduckgo.com
+    (Instant Answer). html-версия DDG часто отдаёт 200 с anomaly-страницей
+    без result__a ссылок — тогда пробуем следующие источники (фикс 04.08:
+    раньше возвращался пустой список и curious_agent молча не учился).
+    """
     import urllib.request
     import urllib.parse
-    import re
 
-    try:
-        encoded = urllib.parse.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-        req = urllib.request.Request(url, headers={"User-Agent": "HermesCuriousAgent/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+    encoded = urllib.parse.quote(query)
+    sources = [
+        ("ddg_html", f"https://html.duckduckgo.com/html/?q={encoded}",
+         "HermesCuriousAgent/1.0", _extract_ddg_html),
+        ("ddg_lite", f"https://lite.duckduckgo.com/lite/?q={encoded}",
+         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", _extract_ddg_lite),
+        ("ddg_api", f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1",
+         "HermesCuriousAgent/1.0", _extract_ddg_api),
+    ]
 
-        results = []
-        # Парсим результаты
-        for match in re.finditer(
-            r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
-            html, re.DOTALL
-        ):
-            url = match.group(1)
-            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
-            # Ищем сниппет рядом
-            snippet_match = re.search(
-                r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
-                html[match.end():match.end() + 2000], re.DOTALL
-            )
-            snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1)).strip() if snippet_match else ""
-            results.append({"title": title, "url": url, "snippet": snippet[:300]})
+    errors = []
+    for name, url, ua, parser in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            results = parser(body)
+            # DDG html умеет отдавать 200 с anomaly-страницей — нужны реальные ссылки
+            if results:
+                return results[:5]
+            errors.append(f"{name}: no results parsed")
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}: {e}")
 
-        return results[:5]
-    except Exception as e:
-        return [{"error": str(e)}]
+    return [{"error": " | ".join(errors) or "no search sources available"}]
 
 
 def research_topic(topic: str) -> dict:
@@ -172,6 +246,16 @@ def run_research(force: bool = False) -> dict:
     """
     knowledge = load_knowledge()
 
+    # Очистка отравленных записей: темы из topics_searched без findings
+    # (результат сломанного поиска 02-04.08, когда тема помечалась
+    # исследованной даже при 0 результатах) — такие темы снова доступны.
+    # Безусловно: при 0 findings (пустой found_topics) topics_searched
+    # тоже должен очиститься, иначе темы навсегда пропускаются.
+    found_topics = {f.get("topic") for f in knowledge.get("findings", [])}
+    knowledge["topics_searched"] = [
+        t for t in knowledge.get("topics_searched", []) if t in found_topics
+    ]
+
     # Проверяем, не искали ли недавно
     last = knowledge.get("last_search", 0)
     if not force and (time.time() - last) < 3600:
@@ -190,10 +274,16 @@ def run_research(force: bool = False) -> dict:
             continue
 
         result = research_topic(topic)
-        if result["sources"] and "error" not in str(result["sources"][0]):
+        # ФИКС 04.08: раньше было "error" not in str(...) — подстрока в
+        # сериализованном dict. Любой нормальный результат с 'errors' в
+        # заголовке ('syntax errors', 'error handling') считался провалом
+        # поиска → curious_agent никогда не сохранял findings.
+        # Теперь: проверка по КЛЮЧУ dict (fail-результат = {"error": ...}).
+        if result["sources"] and "error" not in result["sources"][0]:
             knowledge["findings"].append(result)
             new_findings.append(topic)
-        knowledge["topics_searched"].append(topic)
+            knowledge["topics_searched"].append(topic)
+        # Провал поиска НЕ помечает тему исследованной — retry в следующем запуске
 
     knowledge["last_search"] = time.time()
     save_knowledge(knowledge)
