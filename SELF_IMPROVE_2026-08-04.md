@@ -23,4 +23,25 @@
 - `run_research(force=True)` → `status: ok`, 1 тема, 5 источников в curious_knowledge.json
 
 ---
-*Сгенерировано AGI cron 04.08.2026*
+
+## Что сделано (2-й цикл): error_pattern_learner — trend-aware прогноз рисков
+
+### Проблема
+`predict_risks` помечал HIGH ВСЕ паттерны со streak >= 3 — даже те, что уже
+пропали из свежих сканов (streak лишь декрементится). Отсюда 8 одинаковых
+задач «Investigate and fix pattern» в self_directed_queue с streak 5 — шум.
+
+### Фикс
+- `_pattern_trend(data, pattern, window=6)` — тренд по ПРИСУТСТВИЮ паттерна
+  в сканах (count > 0): первая vs вторая половина окна → rising/stable/falling/new
+- `predict_risks`: HIGH только для rising/stable; falling → low (не засоряет очередь)
+- `get_report`: в строке риска теперь `HIGH (stable): ... (тренд: stable)`
+
+### Верификация
+- SYNTAX OK
+- Юнит-тест 11/11 PASS: stable→high, falling→low, rising→high, new, short-history
+  no-risks, empty-data no-risks, advisory-риск без 'pattern' не ломает словарь
+- Live `report`: тренды отображаются (все текущие — stable, корректно)
+
+---
+*Сгенерировано AGI cron 04.08.2026 (2-й цикл)*

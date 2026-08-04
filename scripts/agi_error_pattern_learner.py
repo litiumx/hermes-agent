@@ -178,8 +178,37 @@ def learn_new_patterns(data: dict, min_occurrences: int = MIN_OCCURRENCES) -> li
     return new_learned
 
 
+def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
+    """Тренд появления паттерна по последним сканам: rising / stable / falling / new.
+
+    Сравниваем ПРИСУТСТВИЕ (count > 0) в первой и второй половине окна:
+    вторая > первой → растёт, < → падает, = → стабилен. Падающий паттерн
+    (последние сканы чистые) реально менее рискован, чем показывает streak,
+    который лишь декрементится и может долго держаться на 3+.
+    """
+    counts = [h.get("patterns", {}).get(pattern, 0) for h in data.get("history", [])][-window:]
+    present = [1 if c > 0 else 0 for c in counts]
+    total = sum(present)
+    if total == 0:
+        return "new"
+    if len(present) < 2:
+        return "stable"
+    half = len(present) // 2
+    first_half = sum(present[:half])
+    second_half = sum(present[half:])
+    if second_half > first_half:
+        return "rising"
+    if second_half < first_half:
+        return "falling"
+    return "stable"
+
+
 def predict_risks(data: dict) -> list:
-    """Предсказывает вероятные проблемы на основе истории."""
+    """Предсказывает вероятные проблемы на основе истории.
+
+    HIGH — только для растущих/стабильных паттернов; падающие (пропадают
+    из свежих сканов) понижаются до low, чтобы не засорять очередь задач.
+    """
     history = data.get("history", [])
     if len(history) < 3:
         return []
@@ -187,10 +216,14 @@ def predict_risks(data: dict) -> list:
     risks = []
     for pattern, count in data.get("streaks", {}).items():
         if count >= 3:
+            trend = _pattern_trend(data, pattern)
+            risk = "high" if trend != "falling" else "low"
             risks.append({
-                "risk": "high",
+                "risk": risk,
                 "pattern": pattern,
-                "message": f"Паттерн '{pattern}' встречался в {count} последних сканах. Вероятен повтор.",
+                "trend": trend,
+                "message": (f"Паттерн '{pattern}' встречался в {count} последних сканах "
+                            f"(тренд: {trend}). Вероятен повтор."),
                 "suggestion": _SUGGESTIONS.get(pattern, "Проверить соответствующие сервисы."),
             })
 
@@ -269,7 +302,8 @@ def get_report() -> str:
     if result["risks"]:
         lines.append("  ⚠️ Риски:")
         for r in result["risks"]:
-            lines.append(f"    {r['risk'].upper()}: {r.get('message', '')}")
+            trend = f" ({r.get('trend', '?')})" if r.get("trend") else ""
+            lines.append(f"    {r['risk'].upper()}{trend}: {r.get('message', '')}")
             if r.get("suggestion"):
                 lines.append(f"      → {r['suggestion']}")
 
