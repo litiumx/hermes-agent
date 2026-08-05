@@ -21,21 +21,31 @@ MAX_ARCHIVE = 10
 MAX_CONTEXT_SIZE_KB = 64
 
 # --- SQLite backend (primary) ---
+import importlib
+
+_STORE = None
 _USE_SQLITE = False
 try:
-    sys.path.insert(0, str(Path(__file__).parent))
-    from agi_context_store import (
-        save_context as _sql_save,
-        load_context as _sql_load,
-        add_pending_task as _sql_add_task,
-        remove_pending_task as _sql_rm_task,
-        age_out_tasks as _sql_age_out,
-        get_session_history as _sql_history,
-        get_stats as _sql_stats,
-    )
+    sys.path.insert(0, str(Path(__file__).parent))  # для импорта из других скриптов
+    _STORE = importlib.import_module("agi_context_store")
     _USE_SQLITE = True
 except ImportError:
-    pass
+    _STORE = None
+
+
+def _store_call(fn_name: str, *args, **kwargs):
+    """Вызвать функцию SQLite-бэкенда. Падает только если бэкенд недоступен —
+    все вызывающие места предварительно проверяют _USE_SQLITE."""
+    if _STORE is None:
+        raise RuntimeError("SQLite backend unavailable")
+    return getattr(_STORE, fn_name)(*args, **kwargs)
+
+
+def _sql_history_safe(hours: int) -> list:
+    """Обёртка: история из SQLite или [] — без падения."""
+    if not _USE_SQLITE:
+        return []
+    return _store_call("get_session_history", hours)
 
 
 def _ensure_dirs():
@@ -51,7 +61,7 @@ def save_context(context: dict, snapshot: bool = True) -> str:
     if _USE_SQLITE:
         try:
             prev = load_context()  # ДО записи — иначе diff всегда пуст
-            _sql_save(context)
+            _store_call("save_context", context)
             diff = _compute_diff(prev, _canonicalize(context))
             return _format_diff(diff) if diff else "no changes (SQLite)"
         except Exception as e:
@@ -85,7 +95,7 @@ def load_context() -> dict:
 
     if _USE_SQLITE:
         try:
-            ctx = _sql_load()
+            ctx = _store_call("load_context")
             if ctx:
                 return _canonicalize(ctx)
         except Exception:
@@ -205,10 +215,22 @@ def get_session_summary() -> str:
     if t:
         lines.append(f"  🕐 Сессия: {time.strftime('%d.%m %H:%M', time.localtime(t))}")
 
-    # Показываем историю
+    # Показываем историю (SQLite-first, JSON fallback)
+    if _USE_SQLITE:
+        try:
+            hist = _sql_history_safe(24 * 7)
+            if hist:
+                lines.append(f"\n  📜 История (SQLite, {len(hist)} сессий за 7д):")
+                for h in hist[:3]:
+                    ts = time.strftime("%d.%m %H:%M", time.localtime(h["timestamp"]))
+                    task = (h.get("last_task") or "?")[:50]
+                    phase = h.get("session_phase", "?")
+                    lines.append(f"    [{ts}] [{phase}] {task}")
+        except Exception:
+            pass
     snapshots = sorted(HISTORY_DIR.glob("snapshot_*.json"), reverse=True)[:3]
     if snapshots:
-        lines.append(f"\n  📜 История ({len(list(HISTORY_DIR.glob('snapshot_*.json')))} снимков):")
+        lines.append(f"\n  📜 Снимки (JSON, {len(list(HISTORY_DIR.glob('snapshot_*.json')))} шт):")
         for s in snapshots:
             try:
                 data = json.loads(s.read_text())
@@ -229,14 +251,17 @@ def get_session_summary() -> str:
 
 
 def _signal_handler(signum, frame):
-    """SIGUSR1: сохранить контекст без вывода."""
+    """SIGUSR1: сохранить контекст через ОСНОВНОЙ бэкенд (SQLite-first).
+
+    Раньше писал напрямую в JSON bridge — при активном SQLite это создавало
+    рассинхрон: load_context() читал SQLite, а сюда попадал JSON. Теперь
+    save_context() сам выбирает бэкенд и архивирует снимок.
+    """
     _ensure_dirs()
     ctx = load_context()
     ctx["session_phase"] = "interrupted"
     ctx["timestamp"] = time.time()
-    with open(BRIDGE_FILE, "w") as f:
-        json.dump(ctx, f, indent=2, ensure_ascii=False)
-    _archive_snapshot(ctx)
+    save_context(ctx, snapshot=True)
 
 
 signal.signal(signal.SIGUSR1, _signal_handler)
@@ -253,7 +278,7 @@ if __name__ == "__main__":
         task = " ".join(sys.argv[2:])
         if task:
             if _USE_SQLITE:
-                ok = _sql_add_task(task)
+                ok = _store_call("add_pending_task", task)
                 print(f"{'Added' if ok else 'Already exists'} (SQLite): {task}")
             else:
                 ctx = load_context()
@@ -264,7 +289,7 @@ if __name__ == "__main__":
         task = " ".join(sys.argv[2:])
         if task:
             if _USE_SQLITE:
-                ok = _sql_rm_task(task)
+                ok = _store_call("remove_pending_task", task)
                 print(f"{'Removed' if ok else 'Not found'} (SQLite): {task}")
             else:
                 ctx = load_context()
@@ -277,14 +302,14 @@ if __name__ == "__main__":
                     print(f"Not found: {task}")
     elif len(sys.argv) > 1 and sys.argv[1] == "age-out":
         if _USE_SQLITE:
-            n = _sql_age_out()
+            n = _store_call("age_out_tasks")
             print(f"Aged out {n} tasks (SQLite)")
         else:
             print("age-out requires SQLite backend")
     elif len(sys.argv) > 1 and sys.argv[1] == "history":
         hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
         if _USE_SQLITE:
-            for h in _sql_history(hours):
+            for h in _sql_history_safe(hours):
                 ts = time.strftime("%d.%m %H:%M", time.localtime(h["timestamp"]))
                 print(f"[{ts}] [{h['session_phase']}] {h['last_task'][:60]}")
         else:
@@ -298,7 +323,7 @@ if __name__ == "__main__":
                     pass
     elif len(sys.argv) > 1 and sys.argv[1] == "stats":
         if _USE_SQLITE:
-            stats = _sql_stats()
+            stats = _store_call("get_stats")
             print(f"Backend: SQLite | Sessions: {stats['total_sessions']} | Tasks: {stats['active_tasks']} | DB: {stats['db_size_kb']}KB")
         else:
             print("Backend: JSON | stats unavailable (use 'summary')")
