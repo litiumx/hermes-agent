@@ -32,3 +32,20 @@
   = 0 поисков PASS; частичный (1 из 3 исследована) = 2 поиска/0.4s PASS;
   fallback при сетевой ошибке = 0.6s (мин 0.6s) PASS.
 - Коммит: 20a0df9. PUSH НЕ ВЫПОЛНЕН — нет GITHUB_TOKEN/кредов в песочнице.
+
+## Цикл 4 (AGI cron, четвёртый запуск дня)
+- `scripts/agi_focus_agent.py` — Phase 7: РЕАЛЬНАЯ авто-компрессия (приоритет #5):
+  1. `get_context_usage()` → теперь возвращает (msgs, tokens): токен-эстимация по
+     SUM(LENGTH(content))//4, fallback msgs*250. COUNT(*) ненадёжен (turns-счётчик).
+  2. `compact_knowledge(max_entries=100, max_age_days=30)` — детерминированная
+     компрессия без LLM: дедуп по topic (свежайшая + склейка источников), прунинг
+     записей старше 30 дней при превышении капа, headroom-сжатие контента >2000
+     символов (fallback — как есть, headroom в песочнице нет).
+  3. `auto_focus_cycle()` — порог по токенам (65% окна 1M) + фолбэк на msgs>600:
+     при превышении ВЫПОЛНЯЕТ compact_knowledge() (action=compacted), а не только
+     советует. История компрессий пишется в focus_history.json (type=compaction).
+  4. Идемпотентность: повторный запуск при неизменных данных = changed:False.
+- Тесты: SYNTAX OK; 7/7 PASS — дедуп+прунинг+кап, идемпотентность, headroom-fallback,
+  cycle high/watch/none, история пишется.
+- Коммит: 8de2627. PUSH НЕ ВЫПОЛНЕН — нет GITHUB_TOKEN/кредов в песочнице
+  (накоплено 3 локальных коммита: 20a0df9, b960848, 8de2627).
