@@ -1,18 +1,23 @@
-# 🧬 Само-улучшение — 05.08.2026 (AGI cron)
+# 🧬 Само-улучшение — 05.08.2026 (AGI cron, второй цикл)
 
 ## Что сделано
-- Новый `scripts/agi_config_guard.py` — реальная валидация конфигов:
-  - YAML-парсинг config.yaml (PyYAML, не regex)
-  - JSON-парсинг всех data/*.json, session/*.json, *.json в корне (кроме .git/worktrees/cache, >1MB)
-  - exit 1 при битых, `--json` для интеграций, `--write` → error_patterns.json (config_corrupt_real)
-- Закрыта дыра: config_corrupt детектился только по regex в логах → ложные риски в очереди.
-  Проверка 119 реальных файлов: ВСЕ валидны — risk 'config_corrupt (rising)' в task_queue был шумом.
+- `scripts/agi_session_bridge.py` — улучшено хранение контекста (приоритет #1):
+  1. **SIGUSR1-хендлер через основной бэкенд.** Раньше писал напрямую в JSON bridge —
+     при активном SQLite load_context() читал БД, а сигнал сохранял в JSON → рассинхрон
+     и потеря "interrupted"-фазы. Теперь идёт через save_context() → SQLite.
+  2. **summary читает историю из SQLite.** Раньше — только JSON-снапшоты HISTORY_DIR,
+     при SQLite-бэкенде секция истории была пустой. Теперь SQLite-first + JSON fallback.
+  3. **Убран дубль импорта**: importlib + `_store_call()` вместо 7 отдельных
+     `from agi_context_store import ...` алиасов (Pyright-clean).
 
 ## Тесты
 - compile() — OK
-- 119 файлов проверено, 0 битых
-- Тест на битых: bad.json (line 2: Expecting value) + bad.yaml (flow sequence) — оба пойманы, PASS
+- backend/stats/summary/history/add-task/rm-task — работают
+- SIGUSR1 эмуляция: sessions +1, phase=interrupted — PASS
+- Pyright: 0 диагностик
 
 ## Очередь
-- risk-задачи mcp_crash/auth_failure/request_timeout/... стабильны (не rising) — не трогаем
-- config_corrupt: подтверждён как regex-шум, теперь есть реальный гард
+- Приоритет #2 error_pattern_learner / #3 curious_agent / #4 self_directed_queue —
+  уже улучшались в прошлых циклах (trend-aware риски, DDG fallback-цепочка).
+- Следующий кандидат: curious_agent — добавить rate-limit между поисками (сейчас
+  возможен быстрый флуд DDG при множестве топиков).
