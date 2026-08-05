@@ -42,15 +42,24 @@ def compress_with_headroom(text: str, min_len: int = 500) -> str:
         return text
 
 def get_context_usage():
-    """Оценить заполнение контекста из state.db (строки сессии)."""
+    """Оценить заполнение контекста из state.db: (кол-во сообщений, оценка токенов)."""
     try:
         conn = sqlite3.connect(SESSION_STATE)
         cur = conn.execute("SELECT COUNT(*) FROM messages")
         total = cur.fetchone()[0]
+        # Токен-эстимация по реальному содержимому: ~4 символа на токен
+        # (COUNT(*) ненадёжен — это счётчик turns, а не объём)
+        tokens = 0
+        try:
+            cur = conn.execute("SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages")
+            chars = cur.fetchone()[0]
+            tokens = int(chars) // 4
+        except Exception:
+            tokens = total * 250  # fallback: ~250 токенов на сообщение
         conn.close()
-        return total
+        return total, tokens
     except Exception:
-        return 0
+        return 0, 0
 
 def load_kb():
     if KB_FILE.exists():
@@ -75,6 +84,82 @@ def add_knowledge(topic: str, content: str, source: str = "auto"):
     save_kb(kb)
     return len(kb["knowledge"])
 
+def _log_event(entry: dict):
+    hist = []
+    if HISTORY_FILE.exists():
+        try:
+            hist = json.load(open(HISTORY_FILE))
+        except Exception:
+            hist = []
+    hist.append(entry)
+    json.dump(hist[-50:], open(HISTORY_FILE, "w"), ensure_ascii=False, indent=2)
+
+
+def compact_knowledge(max_entries: int = 100, max_age_days: int = 30) -> dict:
+    """Авто-компрессия Knowledge block (детерминированная, без LLM):
+    1. Дедуп по topic — оставить свежайшую запись, источники склеить.
+    2. Прунинг старше max_age_days (если записей больше max_entries).
+    3. Headroom-сжатие контента >2000 символов (fallback — срез).
+    Возвращает статистику. Пустое ничего не трогает."""
+    kb = load_kb()
+    before = len(kb["knowledge"])
+    now_ts = time.time()
+    cutoff = now_ts - max_age_days * 86400
+
+    def ts_of(e):
+        try:
+            return datetime.fromisoformat(e.get("timestamp", "")).timestamp()
+        except Exception:
+            return 0
+
+    by_topic = {}
+    for e in kb["knowledge"]:
+        topic = e.get("topic", "untitled")
+        cur = by_topic.get(topic)
+        if cur is None or ts_of(e) > ts_of(cur):
+            if cur is not None:
+                # склеить источники старой записи в новую
+                srcs = set()
+                for s in (cur.get("source", ""), e.get("source", "")):
+                    if s:
+                        srcs.add(s)
+                e = dict(e)
+                e["source"] = ",".join(sorted(srcs))
+            by_topic[topic] = e
+
+    entries = sorted(by_topic.values(), key=ts_of, reverse=True)
+    pruned_old = sum(1 for e in entries if ts_of(e) < cutoff and len(entries) > max_entries)
+    entries = [e for e in entries if ts_of(e) >= cutoff or len(entries) <= max_entries]
+    # финальный кап
+    overflow = len(entries) - max_entries
+    if overflow > 0:
+        entries = entries[:max_entries]
+
+    # headroom-сжатие крупных записей
+    compressed = 0
+    for e in entries:
+        c = e.get("content", "")
+        if len(c) > 2000:
+            cc = compress_with_headroom(c, min_len=2000)
+            if cc != c and len(cc) < len(c):
+                e["content"] = cc
+                compressed += 1
+
+    if len(entries) != before or compressed:
+        kb["knowledge"] = entries
+        save_kb(kb)
+        _log_event({
+            "time": datetime.now().isoformat(),
+            "type": "compaction",
+            "before": before,
+            "after": len(entries),
+            "pruned_old": pruned_old,
+            "compressed": compressed,
+        })
+    return {"before": before, "after": len(entries), "pruned_old": pruned_old,
+            "compressed": compressed, "changed": len(entries) != before or bool(compressed)}
+
+
 def suggest_compact(reason: str):
     """Записать рекомендацию по сжатию + применить если возможно."""
     hist = []
@@ -92,22 +177,28 @@ def suggest_compact(reason: str):
 
 def auto_focus_cycle():
     """Главный цикл — вызывать из крона каждые 30 мин."""
-    msgs = get_context_usage()
+    msgs, tokens = get_context_usage()
     kb = load_kb()
     result = {
         "timestamp": datetime.now().isoformat(),
         "messages_in_db": msgs,
+        "estimated_tokens": tokens,
         "knowledge_entries": len(kb["knowledge"]),
         "action": "none"
     }
 
+    # Порог по токенам (1M окно DeepSeek V4) с фолбэком на счётчик сообщений
+    tok_ratio = tokens / 1_000_000 if tokens else 0
     # Оценка по количеству сообщений (эвристика: 200 сообщений ≈ 50% окна)
-    if msgs > 600:  # >65% окна
-        result["action"] = "compact_advised"
-        result["advice"] = suggest_compact(f"контекст большой ({msgs} сообщений)")
-    elif msgs > 450:  # >50%
+    if tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
+        comp = compact_knowledge()
+        result["action"] = "compacted" if comp["changed"] else "compact_advised"
+        result["compaction"] = comp
+        result["advice"] = suggest_compact(
+            f"контекст большой ({msgs} сообщений, ~{tokens} токенов)")
+    elif tok_ratio > TOKEN_WARN or msgs > 450:  # >50%
         result["action"] = "watch"
-        result["advice"] = f"контекст растёт: {msgs} сообщений, следим"
+        result["advice"] = f"контекст растёт: {msgs} сообщений, ~{tokens} токенов, следим"
 
     return result
 
