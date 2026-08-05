@@ -22,6 +22,10 @@ KNOWLEDGE_FILE = Path("/root/.hermes/data/curious_knowledge.json")
 BRIDGE_FILE = Path("/root/.hermes/session/bridge.json")
 MAX_FINDINGS = 50  # ротация
 
+# Rate-limit между поисками (анти-флуд DDG). Настраивается через env.
+SEARCH_DELAY = float(os.environ.get("AGI_SEARCH_DELAY", "3.0"))      # между темами
+FALLBACK_DELAY = float(os.environ.get("AGI_FALLBACK_DELAY", "1.0"))  # между источниками fallback-цепочки
+
 # SQLite-first: читаем контекст через agi_session_bridge (канонический вид),
 # JSON bridge.json — только fallback
 _USE_BRIDGE = False
@@ -212,7 +216,9 @@ def web_search_standalone(query: str, source: str = "auto") -> list[dict]:
     ]
 
     errors = []
-    for name, url, ua, parser in sources:
+    for idx, (name, url, ua, parser) in enumerate(sources):
+        if idx > 0:
+            time.sleep(FALLBACK_DELAY)  # пауза между источниками fallback-цепочки
         try:
             req = urllib.request.Request(url, headers={"User-Agent": ua})
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -267,11 +273,16 @@ def run_research(force: bool = False) -> dict:
 
     topics = get_active_topics()
     new_findings = []
+    searched_any = False
 
     for topic in topics:
         # Пропускаем уже исследованные
         if topic in knowledge.get("topics_searched", []):
             continue
+        # Rate-limit: пауза ТОЛЬКО между реальными поисками (не после skip)
+        if searched_any:
+            time.sleep(SEARCH_DELAY)
+        searched_any = True
 
         result = research_topic(topic)
         # ФИКС 04.08: раньше было "error" not in str(...) — подстрока в
