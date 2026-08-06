@@ -13,13 +13,14 @@
   python3 agi_config_guard.py            # статус, exit 0/1
   python3 agi_config_guard.py --json     # машиночитаемо (для интеграций)
   python3 agi_config_guard.py --write    # записать результат в error_patterns.json
+  python3 agi_config_guard.py --strict   # exit 2, если YAML не проверен (нет PyYAML)
 
 Интеграция: вызывается proactive_scan.py / cron; --write кормит
 error_patterns.json (config_corrupt: N) чтобы self_directed_queue
 получал реальные риски, а не regex-шум.
 """
 import json
-import re
+import os
 import sys
 from pathlib import Path
 
@@ -79,6 +80,10 @@ def _check_yaml(p: Path) -> str:
 
 def _check_json(p: Path) -> str:
     try:
+        if p.stat().st_size == 0:
+            # Пустой файл — валидный placeholder (состояние ещё не записано),
+            # не мусор в отчёте. Не "corrupt" и не "ok".
+            return "empty"
         json.loads(p.read_text())
         return "ok"
     except json.JSONDecodeError as e:
@@ -98,28 +103,42 @@ def validate() -> dict:
     return results
 
 
-def _write_to_patterns(n_corrupt: int):
-    """Обновить error_patterns.json: config_corrupt = реальное число битых."""
+def _write_to_patterns(n_corrupt: int) -> bool:
+    """Обновить error_patterns.json: config_corrupt = реальное число битых.
+
+    Атомарно: пишем во временный файл в той же директории, затем os.replace.
+    Прямая write_text при краше посередине оставила бы БИТЫЙ patterns.json —
+    ироничная поломка для скрипта целостности.
+    """
     if not PATTERNS_FILE.exists():
-        return
+        return False
     try:
         data = json.loads(PATTERNS_FILE.read_text())
     except json.JSONDecodeError:
-        return  # сам patterns.json битый — не трогаем
+        return False  # сам patterns.json битый — не трогаем
     data["config_corrupt_real"] = n_corrupt
     data["config_corrupt_checked_at"] = __import__("time").time()
-    PATTERNS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp = PATTERNS_FILE.with_name(PATTERNS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    os.replace(tmp, PATTERNS_FILE)  # атомарно на той же ФС
+    return True
 
 
-def main():
+def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    flags = set(argv)
     results = validate()
     corrupt = {p: s for p, s in results.items() if s.startswith("corrupt")}
+    empties = {p: s for p, s in results.items() if s.startswith("empty")}
     skipped = sum(1 for s in results.values() if s.startswith("skip"))
 
-    if "--json" in sys.argv:
+    if "--json" in flags:
         out = {
             "checked": len(results),
             "corrupt": corrupt,
+            "empty": len(empties),
+            "skipped": skipped,
             "ok": True if not corrupt else False,
         }
         print(json.dumps(out, indent=2, ensure_ascii=False))
@@ -132,12 +151,22 @@ def main():
                 print(f"    {p}: {s}")
         else:
             print("  ✅ Все конфиги валидны")
+        if empties:
+            print(f"  ⚪ Пустых (placeholder): {len(empties)}")
 
-    if "--write" in sys.argv:
-        _write_to_patterns(len(corrupt))
-        if "--json" not in sys.argv:
-            print(f"  → error_patterns.json обновлён (config_corrupt_real={len(corrupt)})")
+    if "--write" in flags:
+        ok_write = _write_to_patterns(len(corrupt))
+        if "--json" not in flags:
+            if ok_write:
+                print(f"  → error_patterns.json обновлён (config_corrupt_real={len(corrupt)})")
+            else:
+                print("  → error_patterns.json не найден/битый — запись пропущена")
 
+    # --strict: PyYAML нет, а YAML-файлы есть → честный fail вместо тихого skip
+    if "--strict" in flags and skipped:
+        n_yaml = sum(1 for s in results.values() if s.startswith("skip"))
+        print(f"  ❌ --strict: {n_yaml} YAML-файлов не проверено (PyYAML не установлен)")
+        return 2
     return 1 if corrupt else 0
 
 
