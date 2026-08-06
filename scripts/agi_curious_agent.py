@@ -244,11 +244,14 @@ def research_topic(topic: str) -> dict:
     }
 
 
-def run_research(force: bool = False) -> dict:
+def run_research(force: bool = False, topics_override: list[str] | None = None) -> dict:
     """Главная функция: найти темы → исследовать → сохранить.
 
     Аргументы:
         force: если True, исследовать даже если недавно уже искали
+        topics_override: если задан — исследовать ТОЛЬКО эти темы (directed
+            re-research из очереди планировщика). Отключает кулдаун и пропуск
+            уже исследованных тем: смысл directed-задачи — ОСВЕЖИТЬ stale-тему.
     """
     knowledge = load_knowledge()
 
@@ -262,22 +265,23 @@ def run_research(force: bool = False) -> dict:
         t for t in knowledge.get("topics_searched", []) if t in found_topics
     ]
 
-    # Проверяем, не искали ли недавно
+    # Проверяем, не искали ли недавно (directed-переопределение игнорирует кулдаун)
     last = knowledge.get("last_search", 0)
-    if not force and (time.time() - last) < 3600:
+    if not force and not topics_override and (time.time() - last) < 3600:
         return {
             "status": "skipped",
             "reason": f"Слишком рано. Последний поиск: {datetime.fromtimestamp(last).isoformat()}",
             "findings_count": len(knowledge.get("findings", [])),
         }
 
-    topics = get_active_topics()
+    topics = topics_override if topics_override else get_active_topics()
     new_findings = []
     searched_any = False
 
     for topic in topics:
-        # Пропускаем уже исследованные
-        if topic in knowledge.get("topics_searched", []):
+        # Пропускаем уже исследованные (кроме directed-переопределения —
+        # там задача стоит на РЕ-исследование устаревшей темы)
+        if topic in knowledge.get("topics_searched", []) and not topics_override:
             continue
         # Rate-limit: пауза ТОЛЬКО между реальными поисками (не после skip)
         if searched_any:
@@ -291,6 +295,11 @@ def run_research(force: bool = False) -> dict:
         # поиска → curious_agent никогда не сохранял findings.
         # Теперь: проверка по КЛЮЧУ dict (fail-результат = {"error": ...}).
         if result["sources"] and "error" not in result["sources"][0]:
+            # Directed re-research: заменяем устаревшую находку на свежую
+            # (без этого findings растут неограниченно при повторных циклах)
+            knowledge["findings"] = [
+                f for f in knowledge["findings"] if f.get("topic") != topic
+            ]
             knowledge["findings"].append(result)
             new_findings.append(topic)
             knowledge["topics_searched"].append(topic)
@@ -346,21 +355,37 @@ def search_knowledge(query: str) -> list[dict]:
     return results
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
+    """CLI entrypoint (выделен для тестируемости)."""
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == "search":
-        query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+    argv = sys.argv[1:] if argv is None else argv
+
+    if argv and argv[0] == "search":
+        query = " ".join(argv[1:]) if len(argv) > 1 else ""
         if query:
             results = search_knowledge(query)
             print(json.dumps(results, indent=2, ensure_ascii=False))
         else:
             print("Usage: agi_curious_agent.py search <query>")
-    elif len(sys.argv) > 1 and sys.argv[1] == "force":
+    elif argv and argv[0] == "force":
         result = run_research(force=True)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif argv and argv[0] == "topic":
+        # Directed re-research: исследовать ровно одну тему (из очереди
+        # планировщика), даже если она уже исследована и кулдаун активен.
+        topic = " ".join(argv[1:]).strip()
+        if not topic:
+            print("Usage: agi_curious_agent.py topic <topic>")
+            sys.exit(1)
+        result = run_research(force=True, topics_override=[topic])
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         result = run_research()
         print(json.dumps(result, indent=2, ensure_ascii=False))
         print()
         print(get_report())
+
+
+if __name__ == "__main__":
+    main()

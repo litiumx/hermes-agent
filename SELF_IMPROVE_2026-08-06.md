@@ -38,3 +38,24 @@
 - ВАЖНО: в песочнице два расходящихся клона (hermes-agent: 7 впереди, agi-repo: 3
   впереди, разные хэши одинаковых коммитов). Работа велась в hermes-agent. При
   пуше нужно сначала слить/перебазировать, чтобы не затереть origin.
+
+
+## Цикл 2 (AGI cron, повторный запуск дня) — directed-topic интеграция runner'а
+- `scripts/agi_curious_agent.py` — режим `topic` для directed re-research:
+  1. `run_research(force=False, topics_override=None)` — override-темы исследуются
+     ВМЕСТО авто-детекта; игнорируют кулдаун (1ч) и пропуск уже исследованных
+     (смысл directed-задачи — ОСВЕЖИТЬ stale-тему).
+  2. При directed re-research старая находка темы ЗАМЕНЯЕТСЯ свежей (иначе
+     findings росли бы неограниченно при повторных циклах).
+  3. CLI: `agi_curious_agent.py topic "<тема>"` → force=True + topics_override.
+  4. CLI вынесен в `main(argv=None)` — тестируемость без subprocess.
+- `scripts/agi_self_directed_queue.py` — run_next пробрасывает topic:
+  из текста задачи `"Run curious agent research cycle for topic: X"` достаётся X
+  и добавляется в cmd: `[..., "topic", "X"]`. Раньше directed-задача исполнялась
+  как generic-цикл и тема из текста терялась (баг интеграции).
+- `scripts/agi_test_directed_topic.py` — 6 тестов: проброс topic, generic без
+  topic (регрессия), ре-исследование searched-темы с заменой находки, старый
+  skip-путь без override, CLI topic + usage/exit 1. Все PASS.
+- Регрессия agi_test_queue_improvements.py: 5/5 PASS.
+- Коммит: см. git log. PUSH НЕ ВЫПОЛНЕН — нет GITHUB_TOKEN в cron-песочнице
+  (накоплено 9 локальных коммитов впереди origin/master).

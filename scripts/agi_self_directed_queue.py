@@ -11,6 +11,7 @@
 """
 
 import json
+import re
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -313,6 +314,14 @@ def run_next() -> dict | None:
     task_item = queue[0]
     task_text = task_item["task"]
     cmd = _match_action(task_text)
+
+    # Directed-темы: пробрасываем "for topic: X" из текста задачи в
+    # curious_agent (режим topic). Без этого задача исполняется как
+    # generic-цикл и конкретная stale-тема из текста теряется.
+    if cmd is not None:
+        m = re.search(r"for topic:\s*(.+)", task_text, re.IGNORECASE)
+        if m:
+            cmd = list(cmd) + ["topic", m.group(1).strip()]
 
     if cmd is None:
         # Нет скрипта для исполнения — просто фиксируем пропуск
