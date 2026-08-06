@@ -61,6 +61,7 @@ CATEGORY_WEIGHTS = {
 MAX_QUEUE_SIZE = 20
 TASK_TIMEOUT = 120  # секунд на выполнение одной задачи
 DEFAULT_COOLDOWN = 6 * 3600  # дефолтные задачи не чаще 1 раза в 6ч
+RESEARCH_STALE_HOURS = 24  # находка старше N часов → directed re-research задача
 
 # Маппинг: подстрока задачи → команда исполнения (автономный runner)
 TASK_ACTIONS = [
@@ -123,10 +124,20 @@ def load_state() -> dict:
     if KNOWLEDGE_FILE.exists():
         try:
             knowledge = json.loads(KNOWLEDGE_FILE.read_text())
-            searched = set(knowledge.get("topics_searched", []))
-            # Темы, которые давно не исследовались
+            now = time.time()
+            # Directed re-research: находки старше RESEARCH_STALE_HOURS —
+            # из них планировщик делает конкретные задачи (а не один generic).
+            stale = []
+            for f in knowledge.get("findings", []):
+                topic = f.get("topic")
+                fts = f.get("timestamp", 0)
+                if topic and fts and (now - fts) > RESEARCH_STALE_HOURS * 3600:
+                    stale.append({"topic": topic, "age_hours": (now - fts) / 3600})
+            stale.sort(key=lambda s: s["age_hours"], reverse=True)
+            state["stale_topics"] = stale[:3]
+            # Темы, которые давно не исследовались (fallback: generic задача)
             if knowledge.get("last_search", 0):
-                hours_since = (time.time() - knowledge["last_search"]) / 3600
+                hours_since = (now - knowledge["last_search"]) / 3600
                 if hours_since > 6:
                     state["knowledge_gaps"].append({
                         "reason": f"Нет исследований {hours_since:.0f} часов",
@@ -196,16 +207,27 @@ def build_queue() -> list[dict]:
             "source": "risk",
         })
 
-    # 3. Исследовательские задачи
-    for gap in state.get("knowledge_gaps", []):
+    # 3. Directed re-research: устаревшие темы из knowledge findings —
+    # конкретная задача на тему (а не один generic "research cycle").
+    for st in state.get("stale_topics", []):
         queue.append({
-            "task": f"Run curious agent research cycle",
+            "task": f"Run curious agent research cycle for topic: {st['topic']}",
             "category": "research",
-            "priority": gap.get("priority", 30),
-            "source": "knowledge_gap",
+            "priority": min(30 + int(st["age_hours"] / 12), 55),
+            "source": "stale_topic",
         })
 
-    # 4. Дефолтные задачи если очередь пуста (с кулдауном 6ч)
+    # 4. Исследовательские задачи (generic fallback, если stale тем нет)
+    if not state.get("stale_topics"):
+        for gap in state.get("knowledge_gaps", []):
+            queue.append({
+                "task": f"Run curious agent research cycle",
+                "category": "research",
+                "priority": gap.get("priority", 30),
+                "source": "knowledge_gap",
+            })
+
+    # 5. Дефолтные задачи если очередь пуста (с кулдауном 6ч)
     last_runs = {h["task"]: h["ts"] for h in history}
     default_tasks = [
         ("Run system health check and proactive scan", "improve", 40),
@@ -220,6 +242,16 @@ def build_queue() -> list[dict]:
             "priority": prio,
             "source": "default",
         })
+
+    # Дедупликация по тексту задачи (оставить максимальный приоритет) —
+    # pending из bridge может содержать дубли, и stale-темы не должны
+    # дублировать generic-задачу из knowledge_gaps.
+    best: dict[str, dict] = {}
+    for item in queue:
+        t = item["task"]
+        if t not in best or item["priority"] > best[t]["priority"]:
+            best[t] = item
+    queue = list(best.values())
 
     # Сортировка по приоритету
     queue.sort(key=lambda x: x["priority"], reverse=True)
