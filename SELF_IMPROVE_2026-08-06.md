@@ -59,3 +59,19 @@
 - Регрессия agi_test_queue_improvements.py: 5/5 PASS.
 - Коммит: см. git log. PUSH НЕ ВЫПОЛНЕН — нет GITHUB_TOKEN в cron-песочнице
   (накоплено 9 локальных коммитов впереди origin/master).
+
+## Цикл 3 (AGI cron) — config_guard улучшения (приоритет: agi_config_guard.py не трогался)
+- `scripts/agi_config_guard.py`:
+  1. **Атомарная запись** error_patterns.json: tmp + os.replace (была прямая write_text —
+     краш посередине оставил бы битый patterns.json для скрипта целостности).
+  2. **--strict**: exit 2, если PyYAML отсутствует, а yaml-файлы есть (раньше тихий
+     skip = ложное "всё ок" для proactive_scan).
+  3. **Пустые .json** → статус "empty" вместо "corrupt" (placeholder-файлы не шумят).
+  4. main(argv=None) — тестируемость (как в agi_curious_agent); --json теперь отдаёт
+     empty/skipped счётчики.
+- `scripts/agi_test_config_guard.py` — 15 кейсов, 15 PASS: валид/битый/пустой json,
+  skip YAML, битый patterns не трогается, атомарность без tmp-хвоста, strict 2/0,
+  JSON-структура, main([]) регрессия.
+- Регрессия: agi_test_queue_improvements.py и agi_test_directed_topic.py — ALL PASS.
+- Коммит 0fd2df8. PUSH НЕ ВЫПОЛНЕН: GITHUB_TOKEN нет в cron-песочнице (накоплено 10
+  локальных коммитов впереди origin/master; пуш после docker_forward_env + рестарт).
