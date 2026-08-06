@@ -69,11 +69,14 @@ def search_state_db(db_path, query, limit=5):
         sql = f"""
             SELECT s.{id_col}, s.{title_col}, s.{created_col}, {msg_subq}
             FROM sessions s
-            WHERE s.{title_col} LIKE ? OR s.{id_col} LIKE ?
-            ORDER BY s.{active_col} DESC LIMIT ?
+            ORDER BY s.{active_col} DESC
         """
-        cur = conn.execute(sql, (f"%{query}%", f"%{query}%", limit))
-        return cur.fetchall()
+        rows = conn.execute(sql).fetchall()
+        # Фильтр в Python: SQLite LIKE — ASCII-only (кириллица 'Телеграм' vs 'телеграм' не матчится)
+        q = (query or "").strip().lower()
+        if q:
+            rows = [r for r in rows if q in str(r[0]).lower() or q in str(r[1]).lower()]
+        return rows[:limit]
     finally:
         conn.close()
 
