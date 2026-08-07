@@ -302,17 +302,25 @@ def run_research(force: bool = False, topics_override: list[str] | None = None) 
             ]
             knowledge["findings"].append(result)
             new_findings.append(topic)
+            # Дедуп: directed re-research (stale-темы) повторяет одну тему —
+            # без удаления старых вхождений topics_searched забивается дублями
+            # (кап 100 уходит на одну тему, отчёт врёт по числу тем).
+            knowledge["topics_searched"] = [
+                t for t in knowledge.get("topics_searched", []) if t != topic
+            ]
             knowledge["topics_searched"].append(topic)
         # Провал поиска НЕ помечает тему исследованной — retry в следующем запуске
 
     knowledge["last_search"] = time.time()
     save_knowledge(knowledge)
 
+    # Один вызов get_active_topics (лишний парсинг bridge контекста ни к чему)
+    active = get_active_topics()
     return {
         "status": "ok" if new_findings else "no_new",
         "topics_researched": new_findings,
         "total_findings": len(knowledge.get("findings", [])),
-        "next_topic": get_active_topics()[0] if get_active_topics() else "none",
+        "next_topic": active[0] if active else "none",
     }
 
 
