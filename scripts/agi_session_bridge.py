@@ -19,6 +19,7 @@ BRIDGE_FILE = SESSION_DIR / "bridge.json"
 HISTORY_DIR = SESSION_DIR / "history"
 MAX_ARCHIVE = 10
 MAX_CONTEXT_SIZE_KB = 64
+_MAX_STRING_LEN = 2000  # обрезка длинных строк в снапшотах (traceback'и и т.п.)
 
 # --- SQLite backend (primary) ---
 import importlib
@@ -166,16 +167,39 @@ def _format_diff(diff: dict) -> str:
     return "\n".join(parts) if parts else "no changes"
 
 
+def add_task_json(task: str) -> bool:
+    """Добавить pending task в JSON-бэкенд с дедупом (как SQLite-путь).
+
+    Возвращает True если добавлено, False если такой task уже есть
+    (case-insensitive, с учётом пробелов по краям).
+    """
+    ctx = load_context()
+    tasks = ctx.setdefault("pending_tasks", [])
+    norm = task.strip().lower()
+    if any(t.strip().lower() == norm for t in tasks):
+        return False
+    tasks.append(task.strip())
+    save_context(ctx, snapshot=False)
+    return True
+
+
 def _archive_snapshot(ctx: dict):
     """Сохранить снимок в историю, ротировать старые."""
     _ensure_dirs()
     ts = ctx.get("timestamp", time.time())
-    snapshot_file = HISTORY_DIR / f"snapshot_{ts:.0f}.json"
+    # ms-точность в имени — иначе два снапшота в одну секунду перезаписывают друг друга
+    snapshot_file = HISTORY_DIR / f"snapshot_{ts * 1000:.0f}.json"
 
-    # Ограничиваем размер
+    # Ограничиваем размер: сначала обрезаем длинные строки (traceback'и,
+    # гигантские last_error), потом отбрасываем тяжёлые list/dict поля
     serialized = json.dumps(ctx, indent=2, ensure_ascii=False)
     if len(serialized) > MAX_CONTEXT_SIZE_KB * 1024:
-        ctx = {k: v for k, v in ctx.items() if not isinstance(v, (list, dict)) or len(str(v)) < 500}
+        ctx = {
+            k: (v if not isinstance(v, str) or len(v) <= _MAX_STRING_LEN
+                else v[:_MAX_STRING_LEN] + "...[trunc]")
+            for k, v in ctx.items()
+            if not isinstance(v, (list, dict)) or len(str(v)) < 500
+        }
         serialized = json.dumps(ctx, indent=2, ensure_ascii=False)
 
     snapshot_file.write_text(serialized)
@@ -281,10 +305,8 @@ if __name__ == "__main__":
                 ok = _store_call("add_pending_task", task)
                 print(f"{'Added' if ok else 'Already exists'} (SQLite): {task}")
             else:
-                ctx = load_context()
-                ctx.setdefault("pending_tasks", []).append(task)
-                save_context(ctx, snapshot=False)
-                print(f"Added (JSON): {task}")
+                ok = add_task_json(task)
+                print(f"{'Added' if ok else 'Already exists'} (JSON): {task}")
     elif len(sys.argv) > 1 and sys.argv[1] == "rm-task":
         task = " ".join(sys.argv[2:])
         if task:
@@ -294,8 +316,9 @@ if __name__ == "__main__":
             else:
                 ctx = load_context()
                 tasks = ctx.get("pending_tasks", [])
-                if task in tasks:
-                    tasks.remove(task)
+                before = len(tasks)
+                ctx["pending_tasks"] = [t for t in tasks if t != task]
+                if len(ctx["pending_tasks"]) != before:
                     save_context(ctx, snapshot=False)
                     print(f"Removed (JSON): {task}")
                 else:
