@@ -69,3 +69,47 @@ ALL PASS.
 2. self_directed_queue.py — cooldown для pending-задач из bridge (сейчас
    только risks/defaults кулдаун; pending может плодить повторы между циклами)
 
+
+## Цикл 4 — self_directed_queue: cooldown для pending/stale-topics (коммит ниже)
+(приоритет #4; кандидат из цикла 3)
+
+### Баг
+pending-задачи из bridge и directed stale-темы НЕ имели кулдауна (в отличие
+от risks и defaults). build_queue() вызывается каждый цикл (30-60 мин), и
+пока pending висел в bridge.json (удаляется только mark_completed/run_next),
+задача возвращалась каждый раз → дубли в history, спам-прогоны одной задачи.
+Аналогично: упавший research stale-темы (search fail) ре-квеился каждый цикл.
+
+### Фикс
+Общий кулдаун на уровне очереди: `recent_tasks` (history за последние
+DEFAULT_COOLDOWN=6ч) вычисляется ДО секций 1-3 и применяется к:
+1. pending из bridge (skip если task in recent_tasks)
+2. risks (как было, теперь через общий блок)
+3. stale_topics (skip по точному тексту directed-задачи)
+
+Бонус: skipped-задачи (нет action mapping) теперь тоже уходят в кулдаун —
+раньше run_next() скипал их, но следующий build_queue() возвращал ту же
+задачу наверх очереди (спам skipped в history).
+
+### Тесты: scripts/agi_test_queue_cooldown.py (7 проверок, ALL PASS)
+- pending с прогоном <6ч не ре-квеится; новая задача попадает
+- pending после истечения кулдауна возвращается
+- stale-тема с недавним failed research не ре-квеится; generic не дублирует
+- stale-тема без кулдауна → directed задача есть
+- run_next интеграция: skipped → history → следующий build_queue без задачи
+- регрессия: risk-кулдаун работает
+- дедуп дублей pending внутри одного bridge
+
+### Регрессия
+agi_test_session_bridge, agi_test_error_pattern_learner, agi_test_queue_improvements,
+agi_test_directed_topic, agi_test_config_guard, agi_test_curious_dedup — ALL PASS.
+
+### PUSH
+По-прежнему НЕ выполнен — GITHUB_TOKEN нет в cron-песочнице. Локально
+16 коммитов впереди origin/master. Фикс на хосте: docker_forward_env
+'["GITHUB_TOKEN"]' + рестарт gateway.
+
+### Следующие кандидаты
+1. focus_agent.py — Phase 7 авто-компрессия (не трогали; проверить работу
+   compact_knowledge на реальном knowledge_block.json)
+2. agi_code_reviewer.py / agi_gateway_guard.py — не ревьюились ни разу

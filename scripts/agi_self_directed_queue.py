@@ -175,8 +175,24 @@ def build_queue() -> list[dict]:
     state = load_state()
     queue = []
 
-    # 1. Задачи из bridge
+    # Кулдаун на уровне очереди: задачи, исполнявшиеся (run_next) в
+    # последние DEFAULT_COOLDOWN часов, не пере-добавляем. Без этого
+    # pending из bridge и stale-темы возвращались при каждом
+    # build_queue() (циклы идут каждые 30-60 мин) — повторы плодили
+    # дубли в history и спам-прогоны одной и той же задачи.
+    history = load_history()
+    now = time.time()
+    recent_tasks = {
+        h["task"] for h in history
+        if now - h.get("ts", 0) < DEFAULT_COOLDOWN
+    }
+
+    # 1. Задачи из bridge — с кулдауном: pending может висеть в bridge
+    # между циклами (его удаляет только mark_completed/run_next), без
+    # кулдауна каждая сборка очереди возвращала его заново.
     for task in state.get("pending", []):
+        if task in recent_tasks:
+            continue
         cat, weight = classify_task(task)
         queue.append({
             "task": task,
@@ -188,12 +204,6 @@ def build_queue() -> list[dict]:
     # 2. Задачи на основе рисков — только HIGH, с кулдауном: если задача
     # уже исполнялась (run_next) в последние DEFAULT_COOLDOWN часов, не
     # пере-добавляем её в очередь — иначе каждый build_queue плодит дубли.
-    history = load_history()
-    now = time.time()
-    recent_tasks = {
-        h["task"] for h in history
-        if now - h.get("ts", 0) < DEFAULT_COOLDOWN
-    }
     for risk in state.get("risks", []):
         task_text = (
             f"Investigate and fix pattern: {risk['pattern']} "
@@ -210,9 +220,15 @@ def build_queue() -> list[dict]:
 
     # 3. Directed re-research: устаревшие темы из knowledge findings —
     # конкретная задача на тему (а не один generic "research cycle").
+    # С кулдауном: если research по теме уже исполнялся (успех/фейл/
+    # timeout), не пере-запускаем раньше DEFAULT_COOLDOWN — иначе
+    # упавший поиск ре-квеился каждый цикл и долбил одну тему.
     for st in state.get("stale_topics", []):
+        task_text = f"Run curious agent research cycle for topic: {st['topic']}"
+        if task_text in recent_tasks:
+            continue
         queue.append({
-            "task": f"Run curious agent research cycle for topic: {st['topic']}",
+            "task": task_text,
             "category": "research",
             "priority": min(30 + int(st["age_hours"] / 12), 55),
             "source": "stale_topic",
