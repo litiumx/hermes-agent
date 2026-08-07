@@ -38,7 +38,34 @@ cron-песочнице (`${GITHUB_TOKEN:0:4}` пусто). Накоплено 1
 впереди origin/master. Нужен docker_forward_env '["GITHUB_TOKEN"]' + рестарт
 gateway на хосте.
 
+## Цикл 3 — curious_agent: dedup topics_searched (коммит 0520a21)
+(приоритет #3; error_pattern_learner закрыт в цикле 2)
+
+### Баг
+Directed re-research одной stale-темы (topics_override) ДОБАВЛЯЛ тему в
+topics_searched каждый раз, не удаляя старое вхождение → список забивался
+дублями (репро: 3 цикла → ['stale X']×4). Кап 100 уходил на одну тему,
+отчёт «Тем исследовано: N» врал (считал длину списка, не уникальные темы).
+
+### Фикс
+Перед append — удаление старых вхождений темы:
+`topics_searched = [t for t in topics_searched if t != topic]`, затем append.
+Бонус: `next_topic` теперь один вызов get_active_topics() вместо двух.
+
+### Тесты: scripts/agi_test_curious_dedup.py (5 проверок, ALL PASS)
+- 3 directed цикла одной темы → topics_searched без дублей
+- новая тема добавляется без потери старых
+- регрессия: без override searched-темы пропускаются, дублей нет
+- провал поиска → тема НЕ помечается исследованной (retry возможен)
+- next_topic присутствует при пустом контексте
+
+### Регрессия
+agi_test_session_bridge, agi_test_error_pattern_learner,
+agi_test_queue_improvements, agi_test_directed_topic, agi_test_config_guard —
+ALL PASS.
+
 ### Следующие кандидаты (приоритеты)
-1. curious_agent.py — rate-limit уже добавлен; проверить force/CLI покрытие
-2. self_directed_queue.py — dedup задач в JSON-очереди (паритет SQLite)
-3. focus_agent.py — Phase 7 авто-компрессия
+1. focus_agent.py — Phase 7 авто-компрессия (не трогали с прошлых циклов)
+2. self_directed_queue.py — cooldown для pending-задач из bridge (сейчас
+   только risks/defaults кулдаун; pending может плодить повторы между циклами)
+
