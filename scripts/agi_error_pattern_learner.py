@@ -43,6 +43,7 @@ KNOWN_PATTERNS = {
 _SUGGESTIONS = {
     "file_not_found": "Проверить пути в скриптах/конфигах — файл не найден",
     "gateway_already_running": "Убить старый gateway (gateway.pid) перед рестартом",
+    "gateway_timeout": "Проверить upstream/nginx — 504: gateway не отвечает в срок",
     "connection_refused": "Проверить порт/сервис (nc -z)",
     "request_timeout": "Проверить сеть/таймауты API",
     "api_rate_limit": "Увеличить backoff или подождать",
@@ -58,7 +59,13 @@ _SUGGESTIONS = {
 MAX_LEARNED = 20
 MIN_OCCURRENCES = 3
 
-PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
+try:
+    PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Данные-директория не writable (cron-песочница, read-only mount):
+    # импорт НЕ должен падать — чтение/тесты/--json работают, запись
+    # упадёт позже с явной ошибкой в update_patterns.
+    pass
 
 
 def _tail_text(path: Path, max_bytes: int = TAIL_BYTES) -> str:
@@ -138,8 +145,14 @@ def scan_logs(data: dict, max_lines=2000) -> dict:
 def _normalize_line(line: str) -> str:
     """Нормализует строку ошибки: срезает уровень+[id]+модуль, схлопывает
     check_* функции и числа — чтобы 20 вариантов registry-шума стали 1."""
-    n = re.sub(r"\d+", "N", line)[:140]
-    n = re.sub(r"0x[0-9a-f]+", "0xADDR", n, re.IGNORECASE)
+    n = line[:200]
+    # Сначала hex-адреса: (а) flags= — 4-й позиционный аргумент re.sub это
+    # count, IGNORECASE туда уходил и uppercase-адреса (0xABCDEF01) НЕ
+    # схлопывались; (б) после замены цифр на N паттерн 0x[0-9a-f]+ мёртв.
+    n = re.sub(r"0x[0-9a-f]+", "0xADDR", n, flags=re.IGNORECASE)
+    n = re.sub(r"\d+", "N", n)[:140]
+    # "0" в "0xADDR" превратился в N — вернуть маркер
+    n = n.replace("NxADDR", "0xADDR")
     n = re.sub(r"^(?:WARNING|ERROR|INFO|DEBUG|FATAL)\s+", "", n)
     n = re.sub(r"^\[\S+\]\s+\S+:\s", "", n)
     n = re.sub(r"\bcheck_\w+\b", "check_FN", n)
