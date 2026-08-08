@@ -179,8 +179,19 @@ def cmd_clean_stale(args) -> int:
             reason = "битый JSON"
         else:
             pid = parse_pid_field(data)
-            stale = pid is None or not pid_alive(pid)
-            reason = f"PID {pid} мёртв" if pid else "нет pid"
+            if pid is None:
+                stale, reason = True, "нет pid"
+            elif not pid_alive(pid):
+                stale, reason = True, f"PID {pid} мёртв"
+            else:
+                # PID жив: проверяем, что это реально gateway (PID-reuse guard)
+                cmdline = proc_cmdline(pid)
+                if cmdline is None:
+                    stale, reason = False, f"PID {pid} жив, cmdline недоступен (KEPT)"
+                elif is_gateway_cmdline(cmdline):
+                    stale, reason = False, f"PID {pid} жив, argv совпадает"
+                else:
+                    stale, reason = True, f"PID {pid} жив, но это ДРУГОЙ процесс (PID-reuse): {cmdline[:60]}"
         if stale:
             backup = f"{path}.bak.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             shutil.copy2(path, backup)
