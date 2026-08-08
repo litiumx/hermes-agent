@@ -12,8 +12,10 @@ import json, os, sqlite3, time, hashlib
 from pathlib import Path
 from contextlib import contextmanager
 
-DB_PATH = Path("/root/.hermes/data/context_store.db")
+DB_PATH = Path(os.environ.get("AGI_CONTEXT_STORE_DB", "/root/.hermes/data/context_store.db"))
 TASK_TTL_HOURS = 48  # авто-удаление старых задач
+MAX_SESSIONS = 200   # retention: сколько последних сессий хранить
+SNAPSHOT_TTL_DAYS = 7  # retention: снапшоты старше — на удаление
 
 
 def _ensure_db():
@@ -66,6 +68,9 @@ def _get_conn():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
+        # WAL допускает параллельных читателей, но писатели могут получить
+        # SQLITE_BUSY при конкурентном доступе (cron + gateway) — ждём до 3с
+        conn.execute("PRAGMA busy_timeout=3000")
         yield conn
     finally:
         conn.close()
@@ -100,8 +105,10 @@ def save_context(context: dict) -> int:
         )
         session_id = cursor.lastrowid
 
-        # Сохраняем pending_tasks с дедупликацией
+        # Сохраняем pending_tasks с дедупликацией (пустые/не-строки пропускаем)
         for task in context.get("pending_tasks", []):
+            if not isinstance(task, str) or not task.strip():
+                continue
             th = _task_hash(task)
             conn.execute(
                 """INSERT OR IGNORE INTO pending_tasks
@@ -125,7 +132,7 @@ def load_context(session_id: int = None) -> dict:
     """Загрузить последний контекст (или конкретную сессию)."""
     _ensure_db()
     with _get_conn() as conn:
-        if session_id:
+        if session_id is not None:  # явный id=0 не должен подменяться "последней"
             row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         else:
             row = conn.execute(
@@ -153,6 +160,8 @@ def load_context(session_id: int = None) -> dict:
 
 def add_pending_task(task: str, priority: int = 0, source: str = "manual") -> bool:
     """Добавить задачу с дедупликацией. True если новая."""
+    if not isinstance(task, str) or not task.strip():
+        return False
     _ensure_db()
     th = _task_hash(task)
     with _get_conn() as conn:
@@ -184,6 +193,46 @@ def age_out_tasks() -> int:
         cursor = conn.execute("DELETE FROM pending_tasks WHERE created_at < ?", (cutoff,))
         conn.commit()
         return cursor.rowcount
+
+
+def prune_old(max_sessions: int = MAX_SESSIONS, snapshot_days: int = SNAPSHOT_TTL_DAYS) -> dict:
+    """Retention: обрезать таблицы до разумных размеров.
+
+    - sessions: оставить max_sessions последних (по timestamp), остальные удалить
+      вместе со ссылающимися снапшотами (FK без ON DELETE CASCADE)
+    - context_snapshots: удалить снапшоты старше snapshot_days
+
+    Возвращает {'sessions': n, 'snapshots': n}.
+    """
+    _ensure_db()
+    removed_sessions = removed_snapshots = 0
+    with _get_conn() as conn:
+        # id'шники сессий вне retention-окна
+        stale = conn.execute(
+            """SELECT id FROM sessions
+               WHERE id NOT IN (
+                   SELECT id FROM sessions ORDER BY timestamp DESC LIMIT ?
+               )""",
+            (max_sessions,),
+        ).fetchall()
+        stale_ids = [r["id"] for r in stale]
+        if stale_ids:
+            placeholders = ",".join("?" * len(stale_ids))
+            removed_snapshots += conn.execute(
+                f"DELETE FROM context_snapshots WHERE session_id IN ({placeholders})", stale_ids
+            ).rowcount
+            removed_sessions = conn.execute(
+                f"DELETE FROM sessions WHERE id IN ({placeholders})", stale_ids
+            ).rowcount
+
+        # снапшоты старше TTL (включая сирот от удалённых сессий)
+        snap_cutoff = time.time() - snapshot_days * 86400
+        removed_snapshots += conn.execute(
+            "DELETE FROM context_snapshots WHERE timestamp < ?", (snap_cutoff,)
+        ).rowcount
+        conn.commit()
+
+    return {"sessions": removed_sessions, "snapshots": removed_snapshots}
 
 
 def get_session_history(hours: int = 24) -> list[dict]:
@@ -288,6 +337,9 @@ if __name__ == "__main__":
         elif cmd == "vacuum":
             vacuum()
             print("VACUUM done")
+        elif cmd == "prune":
+            res = prune_old()
+            print(f"Pruned: sessions={res['sessions']}, snapshots={res['snapshots']}")
         elif cmd == "history":
             hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
             for h in get_session_history(hours):
