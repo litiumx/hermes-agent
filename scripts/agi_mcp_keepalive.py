@@ -29,7 +29,7 @@ import re
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 LOGS_DIR = Path("/root/.hermes/logs")
@@ -176,16 +176,28 @@ def cmd_status() -> int:
     return exit_code
 
 
+def _mk_synthetic_line(server: str, msg: str, minutes_ago: float) -> str:
+    """Строка лога с таймстемпом ОТНОСИТЕЛЬНО now — self-test не дрейфует во времени."""
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{ts},123 WARNING tools.mcp_tool: MCP server '{server}' {msg}"
+
+
 def cmd_self_test() -> int:
     """Синтетические логи → проверка классификации. Реальные файлы не трогает."""
     import tempfile
     synthetic = "\n".join([
-        "2026-08-02 10:00:00,123 WARNING tools.mcp_tool: MCP server 'paperclip' initial connection failed (attempt 1/3), retrying in 1s: unhandled errors in a TaskGroup (1 sub-exception)",
-        "2026-08-02 10:01:00,123 WARNING tools.mcp_tool: MCP server 'paperclip' initial connection failed (attempt 2/3), retrying in 2s: unhandled errors in a TaskGroup (1 sub-exception)",
-        "2026-08-02 10:02:00,123 WARNING tools.mcp_tool: MCP server 'paperclip' initial connection failed (attempt 3/3), retrying in 3s: unhandled errors in a TaskGroup (1 sub-exception)",
-        "2026-08-02 10:03:00,123 WARNING tools.mcp_tool: MCP server 'notebooklm' keepalive failed, triggering reconnect (state: connected → degraded): ClosedResourceError: ",
-        "2026-08-02 10:04:00,123 WARNING tools.mcp_tool: MCP server 'notebooklm' keepalive failed, triggering reconnect (state: degraded → disconnected): ClosedResourceError: ",
-        "2026-08-02 10:05:00,123 WARNING tools.mcp_tool: MCP server 'browser' tool call failed: timeout",
+        # paperclip: 3 сбоя за 3 минуты → spike>=3 → crash_loop
+        _mk_synthetic_line("paperclip", "initial connection failed (attempt 1/3), retrying in 1s: unhandled errors in a TaskGroup (1 sub-exception)", 3),
+        _mk_synthetic_line("paperclip", "initial connection failed (attempt 2/3), retrying in 2s: unhandled errors in a TaskGroup (1 sub-exception)", 2),
+        _mk_synthetic_line("paperclip", "initial connection failed (attempt 3/3), retrying in 3s: unhandled errors in a TaskGroup (1 sub-exception)", 1),
+        # notebooklm: 3 keepalive-сбоя, но старее 10 мин (вне всплеска) → degraded
+        _mk_synthetic_line("notebooklm", "keepalive failed, triggering reconnect (state: connected → degraded): ClosedResourceError: ", 21),
+        _mk_synthetic_line("notebooklm", "keepalive failed, triggering reconnect (state: degraded → disconnected): ClosedResourceError: ", 20),
+        _mk_synthetic_line("notebooklm", "keepalive failed, triggering reconnect (state: disconnected → reconnecting): ClosedResourceError: ", 19),
+        # browser: 1 tool-сбой → ok
+        _mk_synthetic_line("browser", "tool call failed: timeout", 15),
+        # stale: строка старше окна → ДОЛЖНА быть проигнорирована
+        _mk_synthetic_line("ancient", "initial connection failed (attempt 1/3), retrying in 1s", 120),
     ])
     with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
         f.write(synthetic)
@@ -193,11 +205,17 @@ def cmd_self_test() -> int:
     try:
         res = scan_logs(window_h=1, log_path=Path(tmp))  # окно 1ч — синтетика свежая
         assert "paperclip" in res and res["paperclip"]["count"] == 3, res
-        assert "notebooklm" in res and res["notebooklm"]["types"].get("keepalive", 0) == 2, res
+        assert "notebooklm" in res and res["notebooklm"]["types"].get("keepalive", 0) == 3, res
         assert "browser" in res and res["browser"]["count"] == 1, res
-        # paperclip: 3 сбоя, но spike 3/10мин и count >= 3 → crash_loop
+        assert "ancient" not in res, f"строки старше окна не должны попадать: {res}"
+        # paperclip: 3 сбоя за 3 мин → spike=3 → crash_loop
         assert res["paperclip"]["state"] == "crash_loop", res
-        print("✅ self-test: 4/4 (paperclip=crash_loop, notebooklm=2×keepalive, browser=1, типы корректны)")
+        # notebooklm: 2 сбоя, всплеска нет (старее 10 мин) → degraded
+        assert res["notebooklm"]["state"] == "degraded", res
+        # browser: 1 сбой < DEGRADE_MIN → ok
+        assert res["browser"]["state"] == "ok", res
+        print("✅ self-test: 7/7 (paperclip=crash_loop, notebooklm=degraded, browser=ok, "
+              "ancient отфильтрован, типы корректны)")
         return 0
     finally:
         Path(tmp).unlink(missing_ok=True)
