@@ -114,3 +114,39 @@ GITHUB_TOKEN появился в песочнице (docker_forward_env фикс
 - Кандидаты на след. цикл: agi_gateway_guard.py (self-test есть, но нет
   standalone-тестов; clean-stale не чистит PID-reuse файлы), agi_curious_agent.py
   (rate-limit сделан, но нет отдельного теста полного цикла).
+
+## Цикл 4 — gateway_guard: PID-reuse в clean-stale + standalone-тесты (коммит fc2a9bf)
+
+### Баг
+cmd_clean_stale считал файл stale только по `pid_alive(pid)`. Если gateway умер,
+а PID переиспользован ДРУГИМ процессом (PID-reuse) — файл оставался «KEPT: PID жив»,
+хотя gateway не запущен. check_file_state() эту ситуацию ловил (5c), а clean-stale — нет.
+
+### Что сделано
+1. **Фикс cmd_clean_stale**: полная классификация —
+   - PID мёртв → stale (как было)
+   - PID жив + argv совпадает (is_gateway_cmdline) → KEPT
+   - PID жив + cmdline ДРУГОЙ процесс → stale (PID-reuse, НОВОЕ)
+   - PID жив + cmdline недоступен (/proc не читается) → консервативно KEPT
+2. **scripts/agi_test_gateway_guard.py — 42 standalone-теста**: load_json
+   (missing/valid/broken), parse_pid_field (прямой/вложенный/мусор), pid_alive
+   (границы <=0), is_gateway_cmdline (7 кейсов, включая "gateway" как слово),
+   check_file_state все 7 веток (missing/alive+gw/alive+foreign/alive+нет-cmdline/
+   dead/broken/нет-pid), cmd_clean_stale (удаление stale+бэкап, broken, KEPT живого,
+   PID-reuse удалён — регрессия, cmdline-недоступен KEPT, exit-коды),
+   cmd_status exit-коды (чисто/stale/дубли), scan_gateway_processes (фильтр).
+
+### Проверка
+- RED: 40 passed, 2 failed (именно PID-reuse) → GREEN: 42/42
+- self-test gateway_guard: 6/6 OK
+- регрессия 11/11 exit=0: session_bridge, error_pattern_learner,
+  queue_improvements, queue_cooldown, directed_topic, config_guard, curious_dedup,
+  focus_agent, context_store, mcp_keepalive + новый gateway_guard
+
+### Push — ВЫПОЛНЕН ✅
+606d342..fc2a9bf master -> master. LOCAL == ORIGIN == fc2a9bf.
+
+### Память на потом
+- Кандидаты: agi_curious_agent.py (rate-limit есть, нет standalone-тестов полного
+  цикла), agi_code_reviewer.py (ни разу не ревьюился), agi_gateway_guard.py
+  cmd_status — добавить проверку gateway_state.json битый/протухший.
