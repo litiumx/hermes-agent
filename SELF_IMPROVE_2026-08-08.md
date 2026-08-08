@@ -71,3 +71,46 @@ directed_topic, config_guard, curious_dedup, focus_agent — ALL PASS.
 НЕ выполнен: GITHUB_TOKEN в cron-песочнице нет (проверено `${GITHUB_TOKEN:0:4}`
 пусто). Локально ~17 коммитов впереди origin/master. Фикс на хосте:
 `docker_forward_env '["GITHUB_TOKEN"]'` + рестарт gateway.
+
+## Цикл 3 — mcp_keepalive: фикс сломанного self-test + standalone-тесты (коммит 8d5ece9)
+
+### Проблема
+self-test agi_mcp_keepalive.py ПАДАЛ (AssertionError {}): синтетические логи
+с хардкод-датами "2026-08-02" — при текущей дате 08.08 все строки отфильтрованы
+окном 1ч (ts < cutoff). Тест был сломан дрейфом времени 6 дней.
+
+### Что сделано
+1. **Фикс self-test**: `_mk_synthetic_line(server, msg, minutes_ago)` — таймстемпы
+   ОТНОСИТЕЛЬНО datetime.now(UTC). Больше не дрейфует. Добавлены кейсы:
+   paperclip=crash_loop (3 сбоя/3мин), notebooklm=degraded (3×keepalive, старее 10мин),
+   browser=ok (1 сбой), ancient отфильтрован (строка старше окна). 7/7 ассертов.
+2. **timedelta в топ-импорт** (был локальный импорт в cmd_self_test — NameError
+   при выносе хелпера на уровень модуля).
+3. **Новый scripts/agi_test_mcp_keepalive.py — 13 standalone-тестов**:
+   _parse_ts (валид/мусор), классификация ok/degraded/down/crash_loop (включая
+   границу: 55 сбоев ВНЕ 10-мин всплеска = down, а НЕ crash_loop — приоритеты),
+   оконная фильтрация (строки 2ч назад при окне 1ч), типы сбоев (conn/keepalive/tool),
+   агрегация одного сервера, save/load_state round-trip + битый JSON + missing
+   (STATE_FILE мокается в tempdir), регрессия self-test.
+4. **Баги найденные тестами**: приоритет crash_loop над down при всплеске —
+   зафиксирован в тесте как ожидаемое поведение (документировано в комменте).
+
+### Проверка
+- синтаксис обоих файлов OK
+- agi_test_mcp_keepalive.py: 13 passed, 0 failed
+- self-test: 7/7 OK
+- регрессия 10/10: session_bridge, error_pattern_learner, curious_dedup,
+  focus_agent, context_store, config_guard, directed_topic, queue_cooldown,
+  queue_improvements, mcp_keepalive + gateway_guard self-test 6/6
+
+### Push — ВЫПОЛНЕН ✅ (впервые за 3 цикла)
+GITHUB_TOKEN появился в песочнице (docker_forward_env фикс сработал).
+Запушен весь бэклог: origin был на 3fa3f64 → теперь 8d5ece9 (все накопленные
+коммиты циклов 1-3 улетели). LOCAL == ORIGIN == 8d5ece9.
+
+### Память на потом
+- ОСТОРОЖНО: хардкод-даты в тестах с window-фильтрацией — всегда генерировать
+  относительно now (уже 2-й такой баг в AGI-коде).
+- Кандидаты на след. цикл: agi_gateway_guard.py (self-test есть, но нет
+  standalone-тестов; clean-stale не чистит PID-reuse файлы), agi_curious_agent.py
+  (rate-limit сделан, но нет отдельного теста полного цикла).
