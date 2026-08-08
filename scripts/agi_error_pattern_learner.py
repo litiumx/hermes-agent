@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """agi_error_pattern_learner.py — автономный предсказатель ошибок.
 
+v3 (08.08.2026): жизненный цикл learned-паттернов. Раньше выученный паттерн
+навсегда занимал слот MAX_LEARNED и никогда не обновлялся: occurrences
+застывали на первом обнаружении, мёртвые регрессии вечно матчились в логах.
+Теперь: повторное появление обновляет occurrences/last_seen (refresh_learned),
+а паттерны без появлений 14+ дней вычищаются (_prune_stale_learned).
+
 v2 (02.08.2026): сканирует РЕАЛЬНЫЕ логи (/root/.hermes/logs/*.log), а не
 SUPERVISOR_LOG.md (там только сводки «0 ошибок»). Самообучение: новые
 повторяющиеся паттерны сохраняются в patterns.json и используются при
@@ -58,6 +64,7 @@ _SUGGESTIONS = {
 
 MAX_LEARNED = 20
 MIN_OCCURRENCES = 3
+LEARNED_TTL_DAYS = 14  # learned-паттерн без появлений дольше этого — удаляется
 
 try:
     PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -159,10 +166,8 @@ def _normalize_line(line: str) -> str:
     return n.strip()[:80]
 
 
-def learn_new_patterns(data: dict, min_occurrences: int = MIN_OCCURRENCES) -> list:
-    """Находит новые повторяющиеся строки ошибок, возвращает новые learned."""
-    known_names = set(KNOWN_PATTERNS.keys()) | {lp["name"] for lp in data.get("learned_patterns", [])}
-
+def _collect_error_counts() -> Counter:
+    """Собирает нормализованные счётчики повторяющихся строк ошибок из логов."""
     text = ""
     for name in LOG_FILES:
         p = LOG_DIR / name
@@ -174,9 +179,16 @@ def learn_new_patterns(data: dict, min_occurrences: int = MIN_OCCURRENCES) -> li
         text, re.IGNORECASE,
     )
     # Считаем по НОРМАЛИЗОВАННОЙ строке (шум registry схлопывается в 1 паттерн)
-    line_counts = Counter(_normalize_line(l) for l in error_lines)
+    return Counter(_normalize_line(l) for l in error_lines)
+
+
+def learn_new_patterns(data: dict, min_occurrences: int = MIN_OCCURRENCES) -> list:
+    """Находит новые повторяющиеся строки ошибок, возвращает новые learned."""
+    known_names = set(KNOWN_PATTERNS.keys()) | {lp["name"] for lp in data.get("learned_patterns", [])}
+
     new_learned = []
-    for normalized, count in line_counts.most_common(50):
+    now = time.time()
+    for normalized, count in _collect_error_counts().most_common(50):
         if count < min_occurrences:
             continue
         name = _learned_name(normalized)
@@ -186,9 +198,47 @@ def learn_new_patterns(data: dict, min_occurrences: int = MIN_OCCURRENCES) -> li
             "name": name,
             "pattern": normalized,
             "occurrences": count,
-            "first_seen": time.time(),
+            "first_seen": now,
+            "last_seen": now,
         })
     return new_learned
+
+
+def refresh_learned(data: dict, counts: Counter = None) -> int:
+    """Обновляет occurrences/last_seen у известных learned-паттернов.
+
+    Раньше повторное появление выученного паттерна не меняло его запись:
+    occurrences застывали, и по данным нельзя было отличить активную
+    регрессию от давно ушедшей. Возвращает число обновлённых паттернов.
+    """
+    if counts is None:
+        counts = _collect_error_counts()
+    by_name = {_learned_name(n): c for n, c in counts.items()}
+    refreshed = 0
+    now = time.time()
+    for lp in data.get("learned_patterns", []):
+        c = by_name.get(lp["name"])
+        if c:
+            lp["occurrences"] = lp.get("occurrences", 0) + c
+            lp["last_seen"] = now
+            refreshed += 1
+    return refreshed
+
+
+def _prune_stale_learned(data: dict, max_age_days: int = LEARNED_TTL_DAYS) -> int:
+    """Удаляет learned-паттерны без появлений дольше max_age_days.
+
+    Мёртвые регрессии не должны вечно занимать слоты MAX_LEARNED и матчиться
+    в сканах. Для старых записей без last_seen используется first_seen —
+    при следующем появлении refresh_learned проставит свежий last_seen.
+    """
+    cutoff = time.time() - max_age_days * 86400
+    before = len(data.get("learned_patterns", []))
+    data["learned_patterns"] = [
+        lp for lp in data.get("learned_patterns", [])
+        if lp.get("last_seen", lp.get("first_seen", 0)) >= cutoff
+    ]
+    return before - len(data["learned_patterns"])
 
 
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
@@ -287,6 +337,10 @@ def update_patterns() -> dict:
         added = len(merged) - prev_total
         data["learned_patterns"] = merged
 
+    # Жизненный цикл learned: обновить активные, вычистить мёртвые (v3)
+    refreshed = refresh_learned(data)
+    pruned = _prune_stale_learned(data)
+
     # Тренды и риски персистим в файл — потребители (self_directed_queue)
     # читают ГОТОВЫЙ trend-aware результат, не скатываясь в наивный
     # streak-логик (фикс: очередь всё ещё плодила 8 одинаковых задач
@@ -305,6 +359,8 @@ def update_patterns() -> dict:
         "risks": risks,
         "learned_total": len(data.get("learned_patterns", [])),
         "learned_new": added,
+        "learned_refreshed": refreshed,
+        "learned_pruned": pruned,
     }
 
 

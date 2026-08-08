@@ -102,7 +102,7 @@ def main():
     matches = epl.scan_logs(data)
     check("file_not_found detected", matches.get("file_not_found", 0) >= 1, f"-> {matches}")
 
-    print("== 8. update_patterns persists to tmp file ==")
+    print("== 8. update_patterns persists to tmp file ===")
     epl.PATTERNS_FILE = tmp / "error_patterns.json"
     res = epl.update_patterns()
     check("status ok", res["status"] == "ok", f"-> {res['status']}")
@@ -110,6 +110,37 @@ def main():
     saved = json.loads(epl.PATTERNS_FILE.read_text())
     check("trends persisted", "trends" in saved, f"-> keys: {list(saved.keys())}")
     check("risks persisted", "risks" in saved)
+
+    print("== 9. refresh_learned updates occurrences/last_seen (v3) ==")
+    (tmp / "errors.log").write_text(
+        "ERROR registry check_task_12 failed\n"
+        "ERROR registry check_task_12 failed\n"  # тот же normalized, ×2
+    )
+    old_ts = time.time() - 1000
+    lp_name = epl._learned_name("registry check_FN failed")  # норм. строка
+    learned = [{"name": lp_name, "pattern": "registry check_FN failed",
+                "occurrences": 1, "first_seen": old_ts, "last_seen": old_ts}]
+    d_refresh = {"learned_patterns": [dict(learned[0])]}
+    n = epl.refresh_learned(d_refresh)
+    check("refreshed 1 pattern", n == 1, f"-> {n}")
+    lp = d_refresh["learned_patterns"][0]
+    check("occurrences incremented", lp["occurrences"] == 3, f"-> {lp['occurrences']}")
+    check("last_seen updated", lp["last_seen"] > old_ts, f"-> {lp['last_seen']:.0f} vs {old_ts:.0f}")
+
+    print("== 10. _prune_stale_learned removes dead patterns (v3) ==")
+    fresh = {"name": "x1", "pattern": "p1", "first_seen": time.time(), "last_seen": time.time()}
+    stale = {"name": "x2", "pattern": "p2", "first_seen": time.time() - 30 * 86400,
+             "last_seen": time.time() - 30 * 86400}
+    legacy = {"name": "x3", "pattern": "p3", "first_seen": time.time() - 30 * 86400}  # без last_seen
+    d_prune = {"learned_patterns": [fresh, stale, legacy]}
+    pruned = epl._prune_stale_learned(d_prune, max_age_days=14)
+    check("pruned 2 stale", pruned == 2, f"-> {pruned}")
+    check("fresh kept", [p["name"] for p in d_prune["learned_patterns"]] == ["x1"],
+          f"-> {[p['name'] for p in d_prune['learned_patterns']]}")
+
+    print("== 11. update_patterns reports refreshed/pruned ==")
+    check("learned_refreshed in result", "learned_refreshed" in res, f"-> keys: {list(res.keys())}")
+    check("learned_pruned in result", "learned_pruned" in res)
 
     shutil.rmtree(tmp, ignore_errors=True)
     print()
