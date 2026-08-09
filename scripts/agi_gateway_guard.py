@@ -7,7 +7,8 @@
 - gateway.pid / gateway.lock — JSON с ключом "pid" внутри, НЕ plain PID
 
 Что делает:
-  status        — проверяет gateway.pid/gateway.lock: жив ли PID, совпадает ли argv
+  status        — проверяет gateway.pid/gateway.lock, gateway_state.json (битый/
+                  протухший/плохое состояние) и живые процессы
   scan          — ищет ВСЕ процессы hermes gateway в /proc, находит дубли
   clean-stale   — удаляет stale lock/pid (PID мёртв), делает .bak перед удалением
   self-test     — синтетическая проверка всех веток во временной директории
@@ -30,6 +31,15 @@ HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
 PID_FILE = os.path.join(HERMES_HOME, "gateway.pid")
 LOCK_FILE = os.path.join(HERMES_HOME, "gateway.lock")
 STATE_FILE = os.path.join(HERMES_HOME, "gateway_state.json")
+
+# Максимальный возраст gateway_state.json (часы) до объявления STALE.
+# Переопределяется env AGI_STATE_MAX_AGE_H (для тестов/тонкой настройки).
+STATE_MAX_AGE_H = float(os.environ.get("AGI_STATE_MAX_AGE_H", "6"))
+
+# Ключи таймстемпа в gateway_state.json — пробуем по порядку.
+STATE_TS_KEYS = ("updated_at", "ts", "timestamp", "started_at")
+# Состояния gateway, при которых работа НЕ идёт (свежий файл ≠ норма).
+STATE_BAD_VALUES = ("error", "failed", "crash", "dead")
 
 GATEWAY_MARKERS = ("hermes", "gateway")
 
@@ -112,6 +122,61 @@ def check_file_state(path: str, label: str):
     return False, f"{label}: STALE — PID {pid} мёртв"
 
 
+def parse_iso_ts(value):
+    """ISO-таймстемп → datetime (UTC). None если не парсится.
+
+    Принимает 'Z'-суффикс, числовой offset, naive (трактуется как UTC).
+    Числа и прочий мусор → None (defensive: возраст просто не оцениваем).
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def check_state_file(path: str, label: str, max_age_h: float = STATE_MAX_AGE_H):
+    """Проверяет gateway_state.json: битый JSON / нет поля / плохое состояние / протухший.
+
+    Возвращает (ok, details). ok=False при:
+    - битом JSON, не-объекте, отсутствии поля gateway_state
+    - состоянии из STATE_BAD_VALUES (error/failed/crash/dead) — даже свежий файл
+    - возрасте старше max_age_h (STALE — gateway мог умереть молча)
+    Отсутствующий файл, намеренный stopped и «время неизвестно» — НЕ проблема.
+    """
+    data = load_json(path)
+    if data is None:
+        return True, f"{label}: отсутствует (норма)"
+    if isinstance(data, dict) and "_error" in data:
+        return False, f"{label}: БИТЫЙ JSON ({data['_error']})"
+    if not isinstance(data, dict):
+        return False, f"{label}: не JSON-объект ({type(data).__name__})"
+    state = data.get("gateway_state")
+    if not state:
+        return False, f"{label}: нет поля gateway_state"
+    age = None
+    for key in STATE_TS_KEYS:
+        ts = parse_iso_ts(data.get(key))
+        if ts is not None:
+            age = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+            break
+    if age is not None:
+        age_h = age / 3600.0
+        if age_h > max_age_h:
+            return False, (f"{label}: STALE — gateway_state={state}, "
+                           f"обновлено {age_h:.1f} ч назад (> {max_age_h:g} ч)")
+        if state in STATE_BAD_VALUES:
+            return False, f"{label}: состояние '{state}' (gateway не работает)"
+        return True, f"{label}: OK — gateway_state={state}, обновлено {age / 60:.0f} мин назад"
+    if state in STATE_BAD_VALUES:
+        return False, f"{label}: состояние '{state}' (gateway не работает)"
+    return True, f"{label}: OK — gateway_state={state}, время неизвестно"
+
+
 def scan_gateway_processes():
     """Все процессы hermes gateway в /proc."""
     found = []
@@ -147,9 +212,9 @@ def cmd_status(args) -> int:
             problems += 1
     else:
         print("  WARN живых gateway-процессов НЕТ (gateway не запущен?)")
-    state = load_json(STATE_FILE)
-    if isinstance(state, dict) and state.get("gateway_state"):
-        print(f"  INFO gateway_state.json: {state.get('gateway_state')}")
+    state_ok, state_msg = check_state_file(STATE_FILE, "gateway_state.json")
+    print(f"  {'OK ' if state_ok else 'FAIL'} {state_msg}")
+    problems += 0 if state_ok else 1
     return 1 if problems else 0
 
 

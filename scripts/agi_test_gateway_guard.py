@@ -187,5 +187,113 @@ with patch.object(g.os, "listdir", return_value=["111", "222", "notapid"]):
         found = g.scan_gateway_processes()
 check("только gateway-процессы", len(found) == 1 and found[0]["pid"] == 111, str(found))
 
+print("== 9. parse_iso_ts: парсинг таймстемпов ==")
+from datetime import datetime, timezone, timedelta
+check("Z-суффикс", g.parse_iso_ts("2026-08-09T12:00:00Z") == datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc))
+check("+offset в UTC", g.parse_iso_ts("2026-08-09T15:00:00+03:00") == datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc))
+check("naive -> UTC", g.parse_iso_ts("2026-08-09T12:00:00") == datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc))
+check("мусор -> None", g.parse_iso_ts("not-a-date") is None)
+check("None -> None", g.parse_iso_ts(None) is None)
+check("число -> None", g.parse_iso_ts(123) is None)
+
+print("== 10. check_state_file: gateway_state.json все ветки ==")
+now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+old_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(timespec="seconds")
+with tempfile.TemporaryDirectory() as tmp:
+    sp = os.path.join(tmp, "state.json")
+    # 10a. отсутствует — норма
+    ok, msg = g.check_state_file(sp, "state")
+    check("missing -> ok", ok, msg)
+    # 10b. битый JSON -> проблема
+    with open(sp, "w") as fh:
+        fh.write("{broken")
+    ok, msg = g.check_state_file(sp, "state")
+    check("broken -> fail", not ok, msg)
+    check("broken reason", "БИТЫЙ" in msg, msg)
+    # 10c. не-объект -> проблема
+    with open(sp, "w") as fh:
+        fh.write("[1,2,3]")
+    ok, msg = g.check_state_file(sp, "state")
+    check("list -> fail", not ok, msg)
+    # 10d. нет gateway_state -> проблема
+    with open(sp, "w") as fh:
+        json.dump({"pid": 1}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("нет поля -> fail", not ok, msg)
+    # 10e. свежий running -> ok
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "updated_at": now_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("свежий running -> ok", ok, msg)
+    # 10f. протухший running -> STALE fail
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "updated_at": old_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("stale -> fail", not ok, msg)
+    check("stale reason", "STALE" in msg, msg)
+    # 10g. ключ ts тоже работает
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "ts": old_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("ts stale -> fail", not ok, msg)
+    # 10h. ключ started_at
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "started_at": now_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("started_at свежий -> ok", ok, msg)
+    # 10i. свежее, но состояние error -> проблема
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "error", "updated_at": now_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("error состояние -> fail", not ok, msg)
+    # 10j. намеренный stopped (свежий) -> ok, не ложная тревога
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "stopped", "updated_at": now_iso}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("stopped -> ok", ok, msg)
+    # 10k. нет таймстемпа -> ok (defensive: нельзя судить о возрасте)
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running"}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("без ts -> ok", ok, msg)
+    # 10l. битый таймстемп -> ok (defensive)
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "updated_at": "garbage"}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("битый ts -> ok", ok, msg)
+    # 10m. будущий таймстемп -> ok (не negative-age fail)
+    fut = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+    with open(sp, "w") as fh:
+        json.dump({"gateway_state": "running", "updated_at": fut}, fh)
+    ok, msg = g.check_state_file(sp, "state")
+    check("будущий ts -> ok", ok, msg)
+
+print("== 11. cmd_status: интеграция gateway_state.json ==")
+with tempfile.TemporaryDirectory() as tmp:
+    orig_pid, orig_lock, orig_state = g.PID_FILE, g.LOCK_FILE, g.STATE_FILE
+    g.PID_FILE, g.LOCK_FILE = os.path.join(tmp, "p.json"), os.path.join(tmp, "l.json")
+    g.STATE_FILE = os.path.join(tmp, "state.json")
+    try:
+        # свежий state + всё чисто -> rc=0
+        with open(g.STATE_FILE, "w") as fh:
+            json.dump({"gateway_state": "running", "updated_at": now_iso}, fh)
+        with patch.object(g, "scan_gateway_processes", return_value=[]):
+            rc = g.cmd_status(None)
+        check("свежий state -> rc=0", rc == 0, str(rc))
+        # битый state -> rc=1
+        with open(g.STATE_FILE, "w") as fh:
+            fh.write("{broken")
+        with patch.object(g, "scan_gateway_processes", return_value=[]):
+            rc = g.cmd_status(None)
+        check("битый state -> rc=1", rc == 1, str(rc))
+        # протухший state -> rc=1
+        with open(g.STATE_FILE, "w") as fh:
+            json.dump({"gateway_state": "running", "updated_at": old_iso}, fh)
+        with patch.object(g, "scan_gateway_processes", return_value=[]):
+            rc = g.cmd_status(None)
+        check("stale state -> rc=1", rc == 1, str(rc))
+    finally:
+        g.PID_FILE, g.LOCK_FILE, g.STATE_FILE = orig_pid, orig_lock, orig_state
+
 print(f"\nИТОГ: {PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
