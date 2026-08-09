@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""agi_code_reviewer.py — авто-ревью своих AGI-коммитов.
+"""agi_code_reviewer.py — авто-ревью своих AGI-коммитов (цикл 6, 09.08).
 
 Фичи:
 - Анализ последнего коммита (git diff HEAD~1..HEAD)
 - Проверки: синтаксис Python, потенциально опасные паттерны, стиль
 - Сохранение отчёта в data/reviews/
 - CLI: `last`, `all`, `<commit-hash>`, `recent N`
+
+Безопасность: subprocess БЕЗ shell=True (list-аргументы) — инъекция через
+commit_ref невозможна. Пути репозитория/отчётов переопределяются env:
+AGI_REPO_DIR (по умолчанию /root/.hermes), AGI_REVIEWS_DIR.
 """
 
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
-HERMES_DIR = Path("/root/.hermes")
-SCRIPTS_DIR = HERMES_DIR / "scripts"
-REVIEWS_DIR = HERMES_DIR / "data" / "reviews"
+REPO_DIR = Path(os.environ.get("AGI_REPO_DIR", "/root/.hermes"))
+SCRIPTS_DIR = REPO_DIR / "scripts"
+REVIEWS_DIR = Path(os.environ.get("AGI_REVIEWS_DIR", str(REPO_DIR / "data" / "reviews")))
 
 # Опасные паттерны (regex → описание)
 DANGER_PATTERNS = {
@@ -36,30 +44,35 @@ GOOD_PATTERNS = {
     r"Path\(.*\)\s*/": "Path вместо os.path (современно)",
 }
 
+DIFF_MARKER = "---DIFF---"
 
-def run(cmd: str) -> str:
-    """Выполнить команду и вернуть stdout."""
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+
+def run(cmd_list) -> str:
+    """Выполнить команду списком аргументов БЕЗ shell (безопасно)."""
+    r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=10)
     return r.stdout.strip() + "\n" + r.stderr.strip()
 
 
-def get_diff(commit_ref: str = "HEAD~1..HEAD") -> str:
-    """Получить diff для коммита/диапазона."""
-    cmd = f"cd {HERMES_DIR} && git diff {commit_ref} --stat && echo '---DIFF---' && git diff {commit_ref}"
-    return run(cmd)
+def get_diff(commit_ref: str, repo_dir=None) -> tuple:
+    """Вернуть (stat, diff) для коммита/диапазона. repo_dir — тестовый оверрайд."""
+    repo = Path(repo_dir) if repo_dir else REPO_DIR
+    stat = run(["git", "-C", str(repo), "diff", commit_ref, "--stat"])
+    diff = run(["git", "-C", str(repo), "diff", commit_ref])
+    return stat.strip(), diff.strip()
 
 
-def review_diff(diff_text: str) -> dict:
-    """Проанализировать diff и вернуть отчёт."""
+def review_diff(diff_text: str, scripts_dir=None) -> dict:
+    """Проанализировать diff и вернуть отчёт. scripts_dir — тестовый оверрайд."""
     findings = {"danger": [], "good": [], "syntax_errors": [], "stats": {}}
+    sdir = Path(scripts_dir) if scripts_dir else SCRIPTS_DIR
 
     # Извлечь .py файлы из stat
     py_files = re.findall(r"scripts/(agi_\w+\.py)", diff_text)
-    findings["stats"]["py_files_changed"] = list(set(py_files))
+    findings["stats"]["py_files_changed"] = sorted(set(py_files))
 
     # Проверка синтаксиса всех изменённых .py файлов
     for fname in set(py_files):
-        fpath = SCRIPTS_DIR / Path(fname).name
+        fpath = sdir / Path(fname).name
         if fpath.exists():
             try:
                 compile(fpath.read_text(), str(fpath), "exec")
@@ -81,7 +94,8 @@ def review_diff(diff_text: str) -> dict:
 
     # Статистика
     findings["stats"]["added_lines"] = len(added_lines)
-    findings["stats"]["deleted_lines"] = len([l for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---")])
+    findings["stats"]["deleted_lines"] = len(
+        [l for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---")])
 
     # Оценка
     danger_count = len(findings["danger"])
@@ -98,11 +112,13 @@ def review_diff(diff_text: str) -> dict:
     return findings
 
 
-def save_report(commit_ref: str, findings: dict) -> Path:
-    """Сохранить отчёт в data/reviews/."""
-    REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+def save_report(commit_ref: str, findings: dict, reviews_dir=None) -> Path:
+    """Сохранить отчёт в data/reviews/. reviews_dir — тестовый оверрайд."""
+    rdir = Path(reviews_dir) if reviews_dir else REVIEWS_DIR
+    rdir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = REVIEWS_DIR / f"review_{ts}_{commit_ref.replace('..', '_').replace('~', 't')}.json"
+    safe_ref = commit_ref.replace("..", "_").replace("~", "t")
+    fname = rdir / f"review_{ts}_{safe_ref}.json"
     report = {
         "timestamp": datetime.now().isoformat(),
         "commit_ref": commit_ref,
@@ -143,39 +159,43 @@ def print_report(findings: dict):
         print(f"   Файлы: {', '.join(s['py_files_changed'])}")
 
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(description="AGI Code Reviewer")
     p.add_argument("target", nargs="?", default="last",
                    help="commit/range: 'last' (HEAD~1..HEAD), 'all' (all AGI), <hash>, <range>")
     p.add_argument("--save", action="store_true", help="Сохранить отчёт в JSON")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     if args.target == "last":
         ref = "HEAD~1..HEAD"
     elif args.target == "all":
-        # Найти все AGI-коммиты
-        log = run(f"cd {HERMES_DIR} && git log --oneline --grep='\\[agi\\]' --format='%H'")
+        log = run(["git", "-C", str(REPO_DIR), "log", "--oneline", "--grep=\\[agi\\]", "--format=%H"])
         hashes = [h for h in log.split("\n") if h]
-        if hashes:
-            ref = f"{hashes[-1]}~1..{hashes[0]}"
-        else:
+        if not hashes:
             print("❌ Нет AGI-коммитов")
-            sys.exit(1)
+            return 1
+        # Без ~1: у старейшего AGI-коммита в shallow-клоне нет родителя
+        ref = f"{hashes[-1]}..{hashes[0]}"
     else:
         ref = args.target
 
     print(f"🔍 Ревью: {ref}")
-    diff = get_diff(ref)
+    stat, diff = get_diff(ref)
 
-    if "---DIFF---" not in diff:
+    if not diff:
         print("❌ Нет изменений для ревью")
-        sys.exit(0)
+        return 0
 
-    findings = review_diff(diff)
+    findings = review_diff(stat + "\n" + DIFF_MARKER + "\n" + diff)
     print_report(findings)
 
     if args.save:
         path = save_report(ref, findings)
         print(f"\n📁 Отчёт сохранён: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
