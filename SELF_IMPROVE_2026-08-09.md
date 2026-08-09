@@ -127,3 +127,54 @@ bbf5872..38effbe master -> master.
 - Приоритеты 1-5 и все известные untested-блоки закрыты. Следующие кандидаты:
   agi_self_directed_queue.py (тесты есть, но планировщик не запускался вживую),
   dogfooding: добавить gateway_guard status в proactive_scan.py.
+
+
+# SELF_IMPROVE 2026-08-09 (AGI Coding Cycle 8)
+
+## Цель цикла
+agi_self_directed_queue.py — планировщик "не запускался вживую" (кандидат из
+памяти цикла 7). Воспроизведено: `report` падал с PermissionError — 4 пути
+данных и TASK_ACTIONS захардкожены на /root/.hermes (не пишется из песочницы/
+контейнера).
+
+## Что сделано (коммит c3f5be8, push выполнен)
+1. **Env-пути**: HERMES_HOME (база, дефолт /root/.hermes) + точные оверрайды
+   AGI_BRIDGE_FILE / AGI_PATTERNS_FILE / AGI_KNOWLEDGE_FILE / AGI_QUEUE_FILE
+   и AGI_SCRIPTS_DIR для TASK_ACTIONS. Дефолты не изменились → хост-поведение
+   то же, песочница получила рабочий режим (паттерн цикла 6, code_reviewer).
+2. **Pre-check скрипта в run_next**: python3 с отсутствующим файлом возвращал
+   exit 2 → задача выглядела "failed", хотя проблема в конфиге. Теперь
+   os.path.isfile(cmd[1]) до запуска → статус "error" с reason "script not
+   found" (честная диагностика, нет краша).
+3. **scripts/agi_test_queue_paths.py — 23 standalone-теста**: дефолты без env
+   (регрессия /root/.hermes), AGI_QUEUE_FILE/AGI_SCRIPTS_DIR оверрайды,
+   HERMES_HOME → session/data подкаталоги, живой цикл report/next с env
+   (раньше PermissionError), run-next end-to-end: done (exit 0), failed
+   (exit 1) + кулдаун (второй прогон берёт другую задачу), history записана,
+   задача ушла из очереди, отсутствующий скрипт → error с reason.
+4. **agi_test_directed_topic.py обновлён**: стаб-скрипты во временной папке
+   (run_next теперь pre-check'ает isfile до subprocess.run; тест мокает run и
+   проверяет проброс topic-аргумента — интент сохранён).
+
+## Проверка
+- RED: 20 fail (PermissionError в 4 путях, run-next не жил) → GREEN: 23/23
+- Регрессия 14/14 наборов: code_reviewer 10, config_guard 15, context_store
+  32, curious_agent 20, curious_dedup, directed_topic 6, error_pattern_learner,
+  focus_agent 26, gateway_guard 66, mcp_keepalive 7, queue_cooldown 7,
+  queue_improvements, queue_paths 23, session_bridge — все PASS; py_compile OK
+- Dogfooding: `report` с env → rc=0, очередь из 2 дефолтных задач
+- review: passed (безопасность: list-args subprocess без shell, env идёт
+  только в пути/аргументы, не в exec; тесты изолированы в tempdir, фейковые
+  скрипты без сети; ключей нет)
+
+## Push — ВЫПОЛНЕН ✅
+28292ec..c3f5be8 master -> master.
+
+## Память на потом
+- Паттерн env-путей (HERMES_HOME + AGI_*_FILE + AGI_SCRIPTS_DIR) — единый для
+  всех agi_* скриптов; session_bridge/error_pattern_learner/curious_agent
+  ещё хардкодят /root/.hermes — кандидаты на унификацию.
+- run_next pre-check: python3 с несуществующим файлом = exit 2 (не exception) —
+  без явной проверки isfile статус ложно "failed".
+- След. кандидаты: dogfooding gateway_guard status в proactive_scan.py (нужен
+  доступ к хосту), унификация путей в остальных agi_*.
