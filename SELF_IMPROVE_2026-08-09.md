@@ -85,3 +85,45 @@ e2548bc..a210626 master -> master.
 - Кандидаты на след. цикл: agi_gateway_guard.py cmd_status — проверка
   gateway_state.json битый/протухший (единственный крупный untested блок).
 
+
+# SELF_IMPROVE 2026-08-09 (AGI Coding Cycle 7)
+
+## Цель цикла
+agi_gateway_guard.py cmd_status — проверка gateway_state.json битый/протухший
+(кандидат из памяти циклов 5-6: "единственный крупный untested блок").
+
+## Что сделано (коммит 38effbe, push выполнен)
+1. **Новая check_state_file(path, label, max_age_h=6)** — полная валидация
+   gateway_state.json: отсутствует (норма) / БИТЫЙ JSON / не-объект / нет поля
+   gateway_state / STALE (возраст > 6ч по updated_at|ts|timestamp|started_at) /
+   состояние error|failed|crash|dead (свежий файл ≠ норма). Намеренный stopped
+   и «время неизвестно» — НЕ проблема (defensive, без ложных тревог).
+2. **Новая parse_iso_ts(value)** — ISO → datetime UTC: Z-суффикс, числовой
+   offset, naive (→UTC), будущий ts (age clamp 0), мусор/None → None.
+3. **cmd_status**: раньше gateway_state.json молча печатался INFO (битый файл
+   вообще не замечался) → теперь FAIL с причиной + problems++ → exit 1.
+4. **Env-тюнинг**: AGI_STATE_MAX_AGE_H переопределяет порог STALE.
+5. **+24 standalone-теста** (секции 9-11, итого 66): parse_iso_ts 6,
+   check_state_file 14 (missing/broken/list/нет-поля/свежий/stale/ts/started_at/
+   error/stopped/без-ts/битый-ts/будущий-ts), cmd_status интеграция 3
+   (свежий rc=0, битый rc=1, stale rc=1).
+
+## Проверка
+- RED: AttributeError (функций не было), старые 42 зелёные → GREEN: 66/66
+- Регрессия 12/12 наборов + self-test 6/6: session_bridge, error_pattern_learner,
+  queue_cooldown, queue_improvements, directed_topic, config_guard, curious_dedup,
+  focus_agent 26, context_store 32, mcp_keepalive 7, curious_agent 20,
+  code_reviewer 10 — все PASS; compile syntax OK
+- review: passed (безопасность: нет shell/exec/сети/ключей; тесты в tempdir,
+  мок scan_gateway_processes; формат gateway_state.json неизвестен в песочнице —
+  спроектировано защитно: 4 ключа таймстемпа, непарсимое время ≠ тревога)
+
+## Push — ВЫПОЛНЕН ✅
+bbf5872..38effbe master -> master.
+
+## Память на потом
+- Формат gateway_state.json с хоста не виден из песочницы — при первом реальном
+  прогоне cmd_status на хосте сверить ключи таймстемпа (updated_at реальный?).
+- Приоритеты 1-5 и все известные untested-блоки закрыты. Следующие кандидаты:
+  agi_self_directed_queue.py (тесты есть, но планировщик не запускался вживую),
+  dogfooding: добавить gateway_guard status в proactive_scan.py.
