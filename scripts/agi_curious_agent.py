@@ -74,24 +74,42 @@ def _ensure_dirs():
 
 
 def load_knowledge() -> dict:
-    """Загрузить накопленные знания."""
+    """Загрузить накопленные знания (с нормализацией типов).
+
+    Битый JSON, валидный JSON не-dict (строка/список) и null-поля →
+    безопасные дефолты. Раньше такие файлы возвращались как есть и
+    run_research падал с TypeError (string indices / 'NoneType' not iterable).
+    """
     _ensure_dirs()
     if KNOWLEDGE_FILE.exists():
         try:
-            return json.loads(KNOWLEDGE_FILE.read_text())
+            data = json.loads(KNOWLEDGE_FILE.read_text())
+            if isinstance(data, dict):
+                if not isinstance(data.get("findings"), list):
+                    data["findings"] = []
+                if not isinstance(data.get("topics_searched"), list):
+                    data["topics_searched"] = []
+                if not isinstance(data.get("last_search"), (int, float)):
+                    data["last_search"] = 0
+                return data
         except (json.JSONDecodeError, OSError):
             pass
     return {"findings": [], "topics_searched": [], "last_search": 0}
 
 
 def save_knowledge(data: dict):
-    """Сохранить знания с ротацией."""
+    """Сохранить знания с ротацией (устойчив к None/не-list полям)."""
     _ensure_dirs()
-    if len(data.get("findings", [])) > MAX_FINDINGS:
-        data["findings"] = data["findings"][-MAX_FINDINGS:]
-    if len(data.get("topics_searched", [])) > 100:
-        data["topics_searched"] = data["topics_searched"][-100:]
-    KNOWLEDGE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+    topics = data.get("topics_searched") if isinstance(data.get("topics_searched"), list) else []
+    if len(findings) > MAX_FINDINGS:
+        findings = findings[-MAX_FINDINGS:]
+    if len(topics) > 100:
+        topics = topics[-100:]
+    KNOWLEDGE_FILE.write_text(json.dumps(
+        {"findings": findings, "topics_searched": topics,
+         "last_search": data.get("last_search", 0)},
+        indent=2, ensure_ascii=False))
 
 
 def get_active_topics() -> list[str]:
