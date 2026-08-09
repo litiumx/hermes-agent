@@ -11,15 +11,19 @@
 """
 
 import json
+import os
 import re
 import time
 from pathlib import Path
 from datetime import datetime, timezone
 
-BRIDGE_FILE = Path("/root/.hermes/session/bridge.json")
-PATTERNS_FILE = Path("/root/.hermes/data/error_patterns.json")
-KNOWLEDGE_FILE = Path("/root/.hermes/data/curious_knowledge.json")
-QUEUE_FILE = Path("/root/.hermes/data/task_queue.json")
+# Пути данных — env-переопределяемые (песочница/контейнеры: /root/.hermes
+# не пишется; HERMES_HOME задаёт базу, AGI_*_FILE — точные файлы).
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+BRIDGE_FILE = Path(os.environ.get("AGI_BRIDGE_FILE", os.path.join(HERMES_HOME, "session/bridge.json")))
+PATTERNS_FILE = Path(os.environ.get("AGI_PATTERNS_FILE", os.path.join(HERMES_HOME, "data/error_patterns.json")))
+KNOWLEDGE_FILE = Path(os.environ.get("AGI_KNOWLEDGE_FILE", os.path.join(HERMES_HOME, "data/curious_knowledge.json")))
+QUEUE_FILE = Path(os.environ.get("AGI_QUEUE_FILE", os.path.join(HERMES_HOME, "data/task_queue.json")))
 
 # SQLite-first: контекст через agi_session_bridge (канонический вид),
 # JSON bridge.json — только fallback
@@ -64,16 +68,20 @@ TASK_TIMEOUT = 120  # секунд на выполнение одной зада
 DEFAULT_COOLDOWN = 6 * 3600  # дефолтные задачи не чаще 1 раза в 6ч
 RESEARCH_STALE_HOURS = 24  # находка старше N часов → directed re-research задача
 
+# Скрипты-исполнители — AGI_SCRIPTS_DIR переопределяет каталог (в песочнице
+# /root/.hermes/scripts недоступен; репо-каталог задаётся через env).
+AGI_SCRIPTS_DIR = os.environ.get("AGI_SCRIPTS_DIR", os.path.join(HERMES_HOME, "scripts"))
+
 # Маппинг: подстрока задачи → команда исполнения (автономный runner)
 TASK_ACTIONS = [
     (("proactive scan", "health check"),
-     ["python3", "/root/.hermes/scripts/proactive_scan.py"]),
+     ["python3", os.path.join(AGI_SCRIPTS_DIR, "proactive_scan.py")]),
     (("self_improve", "self-improvement"),
-     ["python3", "/root/.hermes/scripts/self_improve.py"]),
+     ["python3", os.path.join(AGI_SCRIPTS_DIR, "self_improve.py")]),
     (("curious agent", "research cycle"),
-     ["python3", "/root/.hermes/scripts/agi_curious_agent.py"]),
+     ["python3", os.path.join(AGI_SCRIPTS_DIR, "agi_curious_agent.py")]),
     (("pattern",),
-     ["python3", "/root/.hermes/scripts/agi_error_pattern_learner.py", "report"]),
+     ["python3", os.path.join(AGI_SCRIPTS_DIR, "agi_error_pattern_learner.py"), "report"]),
 ]
 
 
@@ -342,6 +350,11 @@ def run_next() -> dict | None:
     if cmd is None:
         # Нет скрипта для исполнения — просто фиксируем пропуск
         result = {"task": task_text, "status": "skipped", "reason": "no action mapping"}
+    elif cmd[0] == "python3" and len(cmd) > 1 and not os.path.isfile(cmd[1]):
+        # Скрипт отсутствует — честный error ДО запуска (иначе python3 вернул
+        # бы exit 2 и задача выглядела бы как "failed", хотя проблема в конфиге)
+        result = {"task": task_text, "status": "error",
+                  "reason": f"script not found: {cmd[1]}"}
     else:
         try:
             proc = subprocess.run(

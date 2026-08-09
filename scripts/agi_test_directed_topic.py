@@ -17,6 +17,19 @@ q.PATTERNS_FILE = TMP / "error_patterns.json"
 q.KNOWLEDGE_FILE = TMP / "curious_knowledge.json"
 q.QUEUE_FILE = TMP / "task_queue.json"
 ca.KNOWLEDGE_FILE = TMP / "curious_knowledge.json"
+# Стаб-скрипты: run_next с циклом 8 делает pre-check os.path.isfile(скрипт)
+# ДО subprocess.run — несуществующий путь давал бы "error" без вызова run.
+TMP_BIN = TMP / "bin"
+TMP_BIN.mkdir(exist_ok=True)
+for _s in ("proactive_scan.py", "self_improve.py", "agi_curious_agent.py",
+           "agi_error_pattern_learner.py"):
+    (TMP_BIN / _s).write_text("")
+q.TASK_ACTIONS = [
+    (("proactive scan", "health check"), ["python3", str(TMP_BIN / "proactive_scan.py")]),
+    (("self_improve", "self-improvement"), ["python3", str(TMP_BIN / "self_improve.py")]),
+    (("curious agent", "research cycle"), ["python3", str(TMP_BIN / "agi_curious_agent.py")]),
+    (("pattern",), ["python3", str(TMP_BIN / "agi_error_pattern_learner.py"), "report"]),
+]
 
 
 def write(path: Path, data: dict):
