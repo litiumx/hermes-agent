@@ -86,10 +86,25 @@ def review_diff(diff_text: str, scripts_dir=None) -> dict:
             if re.search(pat, line):
                 findings["danger"].append({"pattern": desc, "line": line.strip()[:100]})
 
-    # Поиск хороших паттернов
+    # Многострочные вызовы subprocess: shell=True на отдельной строке
+    # (паттерн выше требует вызов и shell=True на одной строке). Комментарии
+    # и уже отмеченные строки пропускаем — без дублей.
+    flagged = {d["line"] for d in findings["danger"]}
+    for line in added_lines:
+        if re.match(r"\+\s*#", line):
+            continue
+        if re.search(r"shell\s*=\s*True", line):
+            trimmed = line.strip()[:100]
+            if trimmed not in flagged:
+                findings["danger"].append({
+                    "pattern": "shell=True вне вызова на той же строке (многострочный subprocess?)",
+                    "line": trimmed,
+                })
+
+    # Поиск хороших паттернов (дедупликация — один паттерн = одна похвала)
     added_code = "\n".join(added_lines)
     for pat, desc in GOOD_PATTERNS.items():
-        if re.search(pat, added_code):
+        if re.search(pat, added_code) and desc not in findings["good"]:
             findings["good"].append(desc)
 
     # Статистика
