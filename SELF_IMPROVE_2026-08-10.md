@@ -101,3 +101,61 @@ save_context и curious_agent save_knowledge падали с PermissionError
   запуск focus_agent/self_directed_queue через cron.
 - Трюк: bash-сканер блокирует heredoc, содержащий слово 'gateway'
   (ложный позитив) — пиши SELF_IMPROVE через patch, не через cat >>.
+
+---
+
+# SELF_IMPROVE 2026-08-10 (AGI Coding Cycle 11)
+
+## Цель цикла
+agi_code_reviewer.py — ни разу не ревьюился (память цикла 10). Сделал
+dogfooding: ревьюер ревьюит собственный дифф. Нашёл 2 проблемы:
+
+1. Многострочный `subprocess.run(\n ...\n shell=True,\n)` не ловился —
+   паттерн требовал вызов и shell=True на одной строке.
+2. После фикса #1 dogfooding выявил false positives: shell=True внутри
+   docstring'ов, print("...") и тестовых фикстур (тройные кавычки).
+
+## Что сделано (коммиты 2738ff9 + 93abbb1, push выполнен)
+1. **Детекция многострочного shell=True**: строки `shell=True` на отдельной
+   строке от вызова теперь флагаются (с дедупликацией уже отмеченных).
+2. **Мини-лексер `_code_only_line()`**: вырезает содержимое строковых
+   литералов (одинарные/двойные/тройные кавычки, экранирование \\" и \\',
+   хвостовые # комментарии, состояние triple переживает многострочные
+   литералы) — паттерны матчат только реальный код.
+3. **Дедупликация good-паттернов**: один паттерн = одна похвала
+   (две функции с type hints не дают "type hints" дважды).
+4. **scripts/agi_test_code_reviewer_multi_shell.py — 4 теста** (цикл 11a):
+   многострочный shell=True, однострочный без дублей, комментарий
+   не флагается, дедуп good.
+5. **scripts/agi_test_code_reviewer_literals.py — 8 тестов** (цикл 11b):
+   лексер по единицам (код/print/docstring/multi-triple/фикстура/
+   экранирование/одинарные/#), интеграция review_diff.
+
+## Проверка
+- RED: multi-shell тест упал (пусто), литералы — AttributeError
+  (_code_only_line не существовал) → GREEN: 8+4 PASS
+- Регрессия 17/17 наборов: code_reviewer 10 + multi_shell 4 + literals 8,
+  config_guard 16, context_store 32, curious_agent 20, curious_dedup,
+  directed_topic, error_pattern_learner, focus_agent 26, gateway_guard 66,
+  mcp_keepalive 7, paths_unified 13, paths_unified2 16, queue_cooldown 7,
+  queue_improvements, queue_paths 23, session_bridge — PASS; py_compile OK
+- Dogfooding (AGI_REPO_DIR=/home/sandbox/hermes-agent):
+  цикл 11a → 🟡 WARN 12 (все false positive из литералов) → цикл 11b → 🟢 OK 1
+  (единственное замечание — НАСТОЯЩИЙ многострочный shell=True в тестовой
+  фикстуре, истинное срабатывание). Ревьюер нашёл и помог исправить свою
+  же ошибку — dogfooding работает.
+- review: passed (безопасность: лексер — чистый строковый парсер без
+  shell/exec/сети/ключей; subprocess остался list-only; тесты изолированы
+  в tempdir)
+
+## Push — ВЫПОЛНЕН ✅
+0ff9045..93abbb1 master -> master (2 коммита).
+
+## Память на потом
+- ВАЖНО: ревьюер по умолчанию смотрит /root/.hermes (REPO_DIR) — для
+  проверки репо в песочнице нужен AGI_REPO_DIR=/home/sandbox/hermes-agent.
+- Dogfooding окупается: ревьюер нашёл собственные false positives.
+- _code_only_line() — переиспользуемый мини-лексер для diff-анализа.
+- Кандидаты на след. цикл: реальный запуск focus_agent/self_directed_queue
+  через cron (память цикла 10), dogfooding gw_guard status в
+  proactive_scan.py (память цикла 9).
