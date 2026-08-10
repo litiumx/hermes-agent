@@ -46,6 +46,60 @@ GOOD_PATTERNS = {
 
 DIFF_MARKER = "---DIFF---"
 
+# Маркеры тройных кавычек для мини-лексера строковых литералов
+_TRIPLE = ['"""', "'''"]
+
+
+def _code_only_line(line: str, in_triple: bool = False):
+    """Вырезать содержимое строковых литералов из строки diff.
+
+    Возвращает (код_без_литералов, новое_состояние_triple).
+    Нужно, чтобы паттерны вроде shell=True не матчили docstring'и,
+    print("...") и тестовые фикстуры (тройные кавычки). Экранирование
+    \\" и \\' учитывается. Состояние in_triple переживает многострочные
+    литералы.
+    """
+    if in_triple:
+        # Мы внутри тройных кавычек — ищем закрывающую последовательность
+        for close in _TRIPLE:
+            idx = line.find(close)
+            if idx >= 0:
+                rest = line[idx + 3:]
+                return _code_only_line(rest, False)
+        return "", True  # строка целиком внутри литерала
+
+    out = []
+    i = 0
+    n = len(line)
+    while i < n:
+        # Тройные кавычки — открытие многострочного литерала
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            marker = line[i:i + 3]
+            rest = line[i + 3:]
+            idx = rest.find(marker)
+            if idx >= 0:
+                i += 3 + idx + 3  # закрылись в этой же строке
+                continue
+            return "".join(out), True  # перенесём состояние дальше
+        ch = line[i]
+        if ch == "#":
+            break  # комментарий до конца строки (вне строковых литералов)
+        if ch in "\"'":
+            quote = ch
+            j = i + 1
+            while j < n:
+                if line[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if line[j] == quote:
+                    break
+                j += 1
+            i = j + 1  # пропустить закрывающую кавычку (или конец строки)
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), False
+
 
 def run(cmd_list) -> str:
     """Выполнить команду списком аргументов БЕЗ shell (безопасно)."""
@@ -87,13 +141,16 @@ def review_diff(diff_text: str, scripts_dir=None) -> dict:
                 findings["danger"].append({"pattern": desc, "line": line.strip()[:100]})
 
     # Многострочные вызовы subprocess: shell=True на отдельной строке
-    # (паттерн выше требует вызов и shell=True на одной строке). Комментарии
-    # и уже отмеченные строки пропускаем — без дублей.
+    # (паттерн выше требует вызов и shell=True на одной строке). Комментарии,
+    # docstring'и и строковые литералы пропускаем через мини-лексер — без
+    # false positives и дублей.
     flagged = {d["line"] for d in findings["danger"]}
+    in_triple = False
     for line in added_lines:
         if re.match(r"\+\s*#", line):
             continue
-        if re.search(r"shell\s*=\s*True", line):
+        code, in_triple = _code_only_line(line, in_triple)
+        if re.search(r"shell\s*=\s*True", code):
             trimmed = line.strip()[:100]
             if trimmed not in flagged:
                 findings["danger"].append({
