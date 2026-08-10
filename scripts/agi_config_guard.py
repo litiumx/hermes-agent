@@ -29,9 +29,12 @@ try:
 except ImportError:
     yaml = None  # PyYAML нет — YAML-проверка пропускается, JSON всё равно
 
-ROOT = Path("/root/.hermes")
-CONFIG_FILE = ROOT / "config.yaml"
-PATTERNS_FILE = ROOT / "data" / "error_patterns.json"
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+ROOT = Path(HERMES_HOME)
+CONFIG_FILE = Path(os.environ.get("AGI_CONFIG_FILE",
+                                  os.path.join(HERMES_HOME, "config.yaml")))
+PATTERNS_FILE = Path(os.environ.get("AGI_PATTERNS_FILE",
+                                    os.path.join(HERMES_HOME, "data/error_patterns.json")))
 MAX_FILE_BYTES = 1_000_000  # 1MB — больше не конфиг
 # Куда смотрим: корень + data + session, но не .git/worktrees/cache
 SCAN_DIRS = [ROOT, ROOT / "data", ROOT / "session"]

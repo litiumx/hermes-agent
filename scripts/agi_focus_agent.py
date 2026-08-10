@@ -15,10 +15,13 @@ import json, os, sqlite3, time, subprocess
 from datetime import datetime
 from pathlib import Path
 
-HERMES_HOME = Path("/root/.hermes")
-KB_FILE = HERMES_HOME / "data" / "knowledge_block.json"
-HISTORY_FILE = HERMES_HOME / "data" / "focus_history.json"
-SESSION_STATE = HERMES_HOME / "state.db"
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+KB_FILE = Path(os.environ.get("AGI_KB_FILE",
+                              os.path.join(HERMES_HOME, "data/knowledge_block.json")))
+HISTORY_FILE = Path(os.environ.get("AGI_HISTORY_FILE",
+                                   os.path.join(HERMES_HOME, "data/focus_history.json")))
+SESSION_STATE = Path(os.environ.get("AGI_SESSION_STATE",
+                                    os.path.join(HERMES_HOME, "state.db")))
 
 TOKEN_WARN = 0.50
 TOKEN_ACT = 0.65
@@ -69,6 +72,7 @@ def load_kb():
     return {"created": datetime.now().isoformat(), "knowledge": []}
 
 def save_kb(kb):
+    KB_FILE.parent.mkdir(parents=True, exist_ok=True)
     json.dump(kb, open(KB_FILE, "w"), ensure_ascii=False, indent=2)
 
 def add_knowledge(topic: str, content: str, source: str = "auto"):
@@ -94,6 +98,7 @@ def _log_event(entry: dict):
         except Exception:
             hist = []
     hist.append(entry)
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     json.dump(hist[-50:], open(HISTORY_FILE, "w"), ensure_ascii=False, indent=2)
 
 

@@ -12,7 +12,10 @@ import json, os, sqlite3, time, hashlib
 from pathlib import Path
 from contextlib import contextmanager
 
-DB_PATH = Path(os.environ.get("AGI_CONTEXT_STORE_DB", "/root/.hermes/data/context_store.db"))
+DB_PATH = Path(os.environ.get(
+    "AGI_CONTEXT_STORE_DB",
+    os.path.join(os.environ.get("HERMES_HOME", "/root/.hermes"),
+                 "data/context_store.db")))
 TASK_TTL_HOURS = 48  # авто-удаление старых задач
 MAX_SESSIONS = 200   # retention: сколько последних сессий хранить
 SNAPSHOT_TTL_DAYS = 7  # retention: снапшоты старше — на удаление

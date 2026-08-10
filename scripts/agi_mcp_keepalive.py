@@ -25,6 +25,7 @@
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -32,9 +33,13 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-LOGS_DIR = Path("/root/.hermes/logs")
-ERRORS_LOG = LOGS_DIR / "errors.log"
-STATE_FILE = Path("/root/.hermes/data/mcp_keepalive.json")
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+LOGS_DIR = Path(os.environ.get("AGI_LOG_DIR",
+                               os.path.join(HERMES_HOME, "logs")))
+ERRORS_LOG = Path(os.environ.get("AGI_ERRORS_LOG",
+                                 str(LOGS_DIR / "errors.log")))
+STATE_FILE = Path(os.environ.get("AGI_MCP_STATE_FILE",
+                                 os.path.join(HERMES_HOME, "data/mcp_keepalive.json")))
 
 WINDOW_H = 24          # окно анализа, часов
 CRASH_LOOP_MIN = 10    # сбоев за окно → crash_loop (если есть всплеск)
