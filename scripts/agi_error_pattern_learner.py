@@ -15,14 +15,21 @@ file_not_found и gateway_already_running, которых не хватало.
 
 Интеграция: вызывается proactive_scan.py и self_directed_queue.py.
 """
-import json, re, time, hashlib
+import json, os, re, time, hashlib
 from pathlib import Path
 from collections import Counter
 
-PATTERNS_FILE = Path("/root/.hermes/data/error_patterns.json")
-SUPERVISOR_LOG = Path("/root/.hermes/SUPERVISOR_LOG.md")
-SESSION_DIR = Path("/root/.hermes/session")
-LOG_DIR = Path("/root/.hermes/logs")
+# Пути данных — env-переопределяемые (паттерн цикла 8: HERMES_HOME задаёт
+# базу, AGI_*_FILE / AGI_*_DIR — точные пути; песочница без прав на /root).
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+PATTERNS_FILE = Path(os.environ.get("AGI_PATTERNS_FILE",
+                                    os.path.join(HERMES_HOME, "data/error_patterns.json")))
+SUPERVISOR_LOG = Path(os.environ.get("AGI_SUPERVISOR_LOG",
+                                     os.path.join(HERMES_HOME, "SUPERVISOR_LOG.md")))
+SESSION_DIR = Path(os.environ.get("AGI_SESSION_DIR",
+                                  os.path.join(HERMES_HOME, "session")))
+LOG_DIR = Path(os.environ.get("AGI_LOG_DIR",
+                              os.path.join(HERMES_HOME, "logs")))
 
 # Какие лог-файлы сканировать. mcp-stderr.log = 12MB → только хвост.
 LOG_FILES = ["errors.log", "agent.log", "gateway.log", "mcp-stderr.log"]

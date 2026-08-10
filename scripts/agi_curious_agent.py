@@ -18,8 +18,13 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 
-KNOWLEDGE_FILE = Path("/root/.hermes/data/curious_knowledge.json")
-BRIDGE_FILE = Path("/root/.hermes/session/bridge.json")
+# Пути данных — env-переопределяемые (паттерн цикла 8: HERMES_HOME задаёт
+# базу, AGI_*_FILE — точные файлы; песочница без прав на /root/.hermes).
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+KNOWLEDGE_FILE = Path(os.environ.get("AGI_KNOWLEDGE_FILE",
+                                     os.path.join(HERMES_HOME, "data/curious_knowledge.json")))
+BRIDGE_FILE = Path(os.environ.get("AGI_BRIDGE_FILE",
+                                  os.path.join(HERMES_HOME, "session/bridge.json")))
 MAX_FINDINGS = 50  # ротация
 
 # Rate-limit между поисками (анти-флуд DDG). Настраивается через env.

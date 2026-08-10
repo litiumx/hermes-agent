@@ -14,7 +14,11 @@ import json, os, signal, sys, time
 from pathlib import Path
 from typing import Optional
 
-SESSION_DIR = Path("/root/.hermes/session")
+# Пути данных — env-переопределяемые (песочница/контейнеры не пишут
+# /root/.hermes; HERMES_HOME задаёт базу, AGI_SESSION_DIR — точный путь).
+HERMES_HOME = os.environ.get("HERMES_HOME", "/root/.hermes")
+SESSION_DIR = Path(os.environ.get("AGI_SESSION_DIR",
+                                  os.path.join(HERMES_HOME, "session")))
 BRIDGE_FILE = SESSION_DIR / "bridge.json"
 HISTORY_DIR = SESSION_DIR / "history"
 MAX_ARCHIVE = 10
