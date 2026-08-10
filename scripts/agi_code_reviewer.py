@@ -4,6 +4,9 @@
 Фичи:
 - Анализ последнего коммита (git diff HEAD~1..HEAD)
 - Проверки: синтаксис Python, потенциально опасные паттерны, стиль
+- Детекция эксфильтрации (curl|sh, чтение кредов/секретов) и персистентности
+  (crontab, /etc/cron.d, git hooks, .bashrc, чужой pip index) — цикл 12,
+  APPLY #1 из SELF_IMPROVE_2026-08-10 (AISI security)
 - Сохранение отчёта в data/reviews/
 - CLI: `last`, `all`, `<commit-hash>`, `recent N`
 
@@ -34,6 +37,30 @@ DANGER_PATTERNS = {
     r"except\s*:": "голый except: — ловит всё включая SystemExit",
     r"except\s+Exception\s*:": "except Exception — лучше конкретнее",
     r"os\.chmod\s*\([^)]*0o?777": "chmod 777 — слишком широкие права",
+}
+
+# Эксфильтрация (APPLY #1, SELF_IMPROVE_2026-08-10, AISI 08.2026):
+# скачивание+выполнение кода, чтение кредов/секретов. Проверяются только
+# на коде БЕЗ строковых литералов (мини-лексер) — docstring'и не флагаются.
+EXFIL_PATTERNS = {
+    r"\b(curl|wget)\b[^\n]*\|\s*(ba)?sh\b": "curl/wget | sh — скачивание и выполнение (supply chain)",
+    r"\bbase64\b[^\n]*\|\s*(ba)?sh\b": "base64 -d | sh — обфусцированный код",
+    r"cat\s+[^\n]*\.aws/(credentials|config)\b": "чтение AWS-кредов",
+    r"cat\s+[^\n]*\.kube/config\b": "чтение kubeconfig",
+    r"cat\s+[^\n]*\.ssh/id_(rsa|ed25519|ecdsa)\b": "чтение SSH-ключей",
+    r"cat\s+[^\n]*\.env\b": "чтение .env (секреты)",
+}
+
+# Персистентность: инъекция крона, автозапуск, git hooks, перехват кредов,
+# дописывание в rc-файлы, чужой pip index (typosquat-вектор).
+PERSIST_PATTERNS = {
+    r"crontab\s*-\s*$": "crontab - — замена/инъекция крона из stdin",
+    r"/etc/cron\.d/": "запись в /etc/cron.d — персистентность",
+    r"/etc/rc\.local": "запись в rc.local — автозапуск",
+    r"\.git/hooks/": "запись в .git/hooks — перехват git-операций",
+    r"git\s+config\b[^\n]*credential": "git config credential — перехват кредов",
+    r">>\s*~?/\.(bashrc|profile|zshrc)\b": "дописывание в .bashrc/.profile — персистентность",
+    r"pip[23]?\s+install\b[^\n]*(--index-url|--extra-index-url)": "pip install с чужим index — возможный typosquat",
 }
 
 # Хорошие паттерны (regex → похвала)
@@ -115,9 +142,26 @@ def get_diff(commit_ref: str, repo_dir=None) -> tuple:
     return stat.strip(), diff.strip()
 
 
+def _file_line_context(fpath, lineno):
+    """Состояние triple-кавычек ПЕРЕД строкой lineno в реальном файле.
+
+    Diff-фрагмент может не содержать открытия docstring'а (оно вне hunk'а) —
+    тогда состояние строкового литерала восстанавливается из файла на диске
+    (staged-версия). Если файл недоступен — False (полагаемся на diff).
+    """
+    try:
+        lines = Path(fpath).read_text().split("\n")
+    except OSError:
+        return False
+    in_triple = False
+    for raw in lines[: lineno - 1]:
+        _, in_triple = _code_only_line(raw, in_triple)
+    return in_triple
+
+
 def review_diff(diff_text: str, scripts_dir=None) -> dict:
     """Проанализировать diff и вернуть отчёт. scripts_dir — тестовый оверрайд."""
-    findings = {"danger": [], "good": [], "syntax_errors": [], "stats": {}}
+    findings = {"danger": [], "good": [], "syntax_errors": [], "exfil": [], "persist": [], "stats": {}}
     sdir = Path(scripts_dir) if scripts_dir else SCRIPTS_DIR
 
     # Извлечь .py файлы из stat
@@ -143,13 +187,55 @@ def review_diff(diff_text: str, scripts_dir=None) -> dict:
     # Многострочные вызовы subprocess: shell=True на отдельной строке
     # (паттерн выше требует вызов и shell=True на одной строке). Комментарии,
     # docstring'и и строковые литералы пропускаем через мини-лексер — без
-    # false positives и дублей.
+    # false positives и дублей. Там же проверяем эксфильтрацию и
+    # персистентность (только на коде без литералов).
+    # Состояние triple-кавычек гоняется по ВСЕМ строкам диффа (контекстные +
+    # добавленные): docstring, открытый в неизменённой части диффа, не даёт
+    # false positives на добавленных строках.
     flagged = {d["line"] for d in findings["danger"]}
     in_triple = False
-    for line in added_lines:
-        if re.match(r"\+\s*#", line):
+    cur_file, cur_lineno = None, 0
+    for line in diff_text.split("\n"):
+        if line.startswith("+++"):
+            m = re.match(r"\+\+\+ b/(\S+)", line)
+            cur_file = m.group(1) if m else None
+            cur_lineno = 0
             continue
-        code, in_triple = _code_only_line(line, in_triple)
+        if line.startswith("---"):
+            continue
+        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+        if m:
+            cur_lineno = int(m.group(1))
+            continue
+        if line.startswith("+"):
+            is_added, content = True, line[1:]
+        elif line.startswith("-"):
+            continue  # удалённые строки не влияют на состояние нового файла
+        elif line.startswith(" "):
+            is_added, content = False, line[1:]
+        else:
+            continue  # заголовки diff
+        # Любая существующая строка (added/context, включая комментарии)
+        # присутствует в файле на диске — номер строки обязан расти
+        cur_lineno += 1
+        if re.match(r"\s*#", content):
+            continue  # комментарии: состояние triple не меняют
+        if is_added:
+            # Файл на диске — источник истины о состоянии литералов
+            # (открытие доки может быть вне hunk'а диффа)
+            if cur_file and cur_file.endswith(".py"):
+                if _file_line_context(sdir / Path(cur_file).name, cur_lineno):
+                    in_triple = True
+                    continue
+        else:
+            # Контекстные строки тоже сверяем с файлом: чистая строка \"\"\"
+            # лексером трактуется как открытие, а в файле это закрытие доки
+            if cur_file and cur_file.endswith(".py"):
+                in_triple = _file_line_context(sdir / Path(cur_file).name, cur_lineno + 1)
+                continue
+        code, in_triple = _code_only_line(content, in_triple)
+        if not is_added:
+            continue
         if re.search(r"shell\s*=\s*True", code):
             trimmed = line.strip()[:100]
             if trimmed not in flagged:
@@ -157,6 +243,25 @@ def review_diff(diff_text: str, scripts_dir=None) -> dict:
                     "pattern": "shell=True вне вызова на той же строке (многострочный subprocess?)",
                     "line": trimmed,
                 })
+        for pat, desc in EXFIL_PATTERNS.items():
+            if re.search(pat, code):
+                findings["exfil"].append({"pattern": desc, "line": line.strip()[:100]})
+        for pat, desc in PERSIST_PATTERNS.items():
+            if re.search(pat, code):
+                findings["persist"].append({"pattern": desc, "line": line.strip()[:100]})
+
+    # Дедупликация эксфильтрации/персистентности (паттерн+строка)
+    def _dedup(items):
+        seen, out = set(), []
+        for it in items:
+            k = (it["pattern"], it["line"])
+            if k not in seen:
+                seen.add(k)
+                out.append(it)
+        return out
+
+    findings["exfil"] = _dedup(findings["exfil"])
+    findings["persist"] = _dedup(findings["persist"])
 
     # Поиск хороших паттернов (дедупликация — один паттерн = одна похвала)
     added_code = "\n".join(added_lines)
@@ -172,8 +277,11 @@ def review_diff(diff_text: str, scripts_dir=None) -> dict:
     # Оценка
     danger_count = len(findings["danger"])
     syntax_count = len(findings["syntax_errors"])
+    security_count = len(findings["exfil"]) + len(findings["persist"])
     if syntax_count > 0:
         findings["verdict"] = "🔴 FAIL — ошибки синтаксиса"
+    elif security_count > 0:
+        findings["verdict"] = "🔴 SEC — потенциальная эксфильтрация/персистентность (проверить вручную)"
     elif danger_count > 2:
         findings["verdict"] = "🟡 WARN — много рискованных паттернов"
     elif danger_count > 0:
@@ -215,6 +323,18 @@ def print_report(findings: dict):
         print(f"\n🟡 Замечания ({len(findings['danger'])}):")
         for d in findings["danger"]:
             print(f"   ⚠️  {d['pattern']}")
+            print(f"      → {d['line']}")
+
+    if findings["exfil"]:
+        print(f"\n🔴 Эксфильтрация ({len(findings['exfil'])}):")
+        for d in findings["exfil"]:
+            print(f"   ❗ {d['pattern']}")
+            print(f"      → {d['line']}")
+
+    if findings["persist"]:
+        print(f"\n🔴 Персистентность ({len(findings['persist'])}):")
+        for d in findings["persist"]:
+            print(f"   ❗ {d['pattern']}")
             print(f"      → {d['line']}")
 
     if findings["good"]:
