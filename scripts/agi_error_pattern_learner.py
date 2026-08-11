@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """agi_error_pattern_learner.py — автономный предсказатель ошибок.
 
+v4 (11.08.2026): предсказание по КОНТЕКСТУ (grow point 11.08: «не только
+по тексту ошибки»). Из истории сканов строится карта пар со-встречаемостей:
+если паттерн A исторически приходил в одном скане с B (gateway_timeout +
+connection_refused), то при обнаружении A в свежем скане B предсказывается
+как вероятный следующий (predict_companions). Карта пар и прогноз
+персистятся в patterns.json (cooccurrences / companions).
+
 v3 (08.08.2026): жизненный цикл learned-паттернов. Раньше выученный паттерн
 навсегда занимал слот MAX_LEARNED и никогда не обновлялся: occurrences
 застывали на первом обнаружении, мёртвые регрессии вечно матчились в логах.
@@ -72,6 +79,8 @@ _SUGGESTIONS = {
 MAX_LEARNED = 20
 MIN_OCCURRENCES = 3
 LEARNED_TTL_DAYS = 14  # learned-паттерн без появлений дольше этого — удаляется
+COOCCUR_MIN_PAIRS = 2   # пара паттернов считается значимой после N совместных сканов
+MAX_COMPANIONS = 3      # сколько парных паттернов предсказывать за раз
 
 try:
     PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -248,6 +257,60 @@ def _prune_stale_learned(data: dict, max_age_days: int = LEARNED_TTL_DAYS) -> in
     return before - len(data["learned_patterns"])
 
 
+def _learn_cooccurrences(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
+    """Строит карту парных со-встречаемостей паттернов из истории сканов.
+
+    Для каждой записи истории (скана) все присутствующие паттерны (count>0)
+    попарно инкрементятся в обе стороны — карта симметрична. Пары с
+    частотой < min_pairs отбрасываются: одна случайная встреча не паттерн.
+    Записи без "patterns" (legacy/повреждённые) пропускаются молча.
+    """
+    pairs: dict = {}
+    for h in data.get("history", []):
+        pats = h.get("patterns") or {}
+        names = [n for n, c in pats.items() if c > 0]
+        for i in range(len(names)):
+            a = names[i]
+            for b in names[i + 1:]:
+                pairs.setdefault(a, {}).setdefault(b, 0)
+                pairs[a][b] += 1
+                pairs.setdefault(b, {}).setdefault(a, 0)
+                pairs[b][a] += 1
+    return {a: {b: c for b, c in bs.items() if c >= min_pairs}
+            for a, bs in pairs.items() if any(c >= min_pairs for c in bs.values())}
+
+
+def predict_companions(data: dict, current_matches: dict,
+                       min_pairs: int = COOCCUR_MIN_PAIRS,
+                       max_companions: int = MAX_COMPANIONS) -> list:
+    """Предсказывает паттерны, исторически приходящие ВМЕСТЕ с текущими.
+
+    Контекст-предсказание (v4): если A в прошлом регулярно появлялся в одном
+    скане с B, а сейчас найден только A — B вероятен следующим. Уже
+    присутствующие паттерны исключаются. Возвращает до max_companions
+    кандидатов, отсортированных по убыванию co_score (число совместных сканов).
+    """
+    present = {n for n, c in (current_matches or {}).items() if c > 0}
+    if not present:
+        return []
+    co = data.get("cooccurrences")
+    if not co:
+        co = _learn_cooccurrences(data, min_pairs)
+    scores: dict = {}
+    for a in present:
+        for b, cnt in (co.get(a) or {}).items():
+            if b in present:
+                continue
+            scores[b] = scores.get(b, 0) + cnt
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:max_companions]
+    return [{
+        "pattern": b,
+        "co_score": c,
+        "message": (f"Паттерн '{b}' исторически появляется вместе с текущими "
+                    f"ошибками ({c} совместных сканов). Вероятен следующим."),
+    } for b, c in ranked]
+
+
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
     """Тренд появления паттерна по последним сканам: rising / stable / falling / new.
 
@@ -355,6 +418,14 @@ def update_patterns() -> dict:
     risks = predict_risks(data)
     data["trends"] = {r["pattern"]: r["trend"] for r in risks if r.get("pattern")}
     data["risks"] = risks
+
+    # Контекст-предсказание (v4): пары со-встречаемостей из истории
+    # (текущий скан уже в history — его пара тоже считается), затем
+    # прогноз парных паттернов по свежим матчам.
+    data["cooccurrences"] = _learn_cooccurrences(data)
+    companions = predict_companions(data, matches)
+    data["companions"] = companions
+
     data["last_update"] = timestamp
     with open(PATTERNS_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -364,6 +435,8 @@ def update_patterns() -> dict:
         "matches": matches,
         "streaks": streaks,
         "risks": risks,
+        "companions": companions,
+        "cooccurrence_pairs": sum(len(v) for v in data["cooccurrences"].values()),
         "learned_total": len(data.get("learned_patterns", [])),
         "learned_new": added,
         "learned_refreshed": refreshed,
@@ -393,7 +466,12 @@ def get_report() -> str:
     if result["learned_new"]:
         lines.append(f"  🧬 Выучено новых паттернов: {result['learned_new']} (всего {result['learned_total']})")
 
-    if not result["matches"] and not result["risks"]:
+    if result.get("companions"):
+        lines.append("  ⏭ Прогноз по контексту:")
+        for c in result["companions"]:
+            lines.append(f"    → {c['pattern']} (co-score {c['co_score']})")
+
+    if not result["matches"] and not result["risks"] and not result.get("companions"):
         lines.append("  ✅ Новых паттернов ошибок не найдено.")
 
     return "\n".join(lines)
