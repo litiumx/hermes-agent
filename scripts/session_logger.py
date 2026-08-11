@@ -292,6 +292,9 @@ if __name__ == "__main__":
                 for s in results:
                     print(f"  {s[0][:20]} | {s[1][:60]} | {s[2][:10]} | {s[3]}msgs")
                 print(f"\nВсего найдено: {len(results)}")
+            elif state_db:
+                print(f"Источник: {source}")
+                print(f"Ничего не найдено по запросу '{q}'.")
             else:
                 print(f"Источник: {source}")
                 print("Сессий не найдено. state.db недоступен в этой среде "
