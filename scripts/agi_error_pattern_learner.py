@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """agi_error_pattern_learner.py — автономный предсказатель ошибок.
 
+v5 (11.08.2026): контекст по МОДУЛЮ (grow point 11.08: «какой лог-файл/
+сервис дал ошибку — сузить предсказания до сервиса»). scan_logs_by_source
+считает матчи ПО ИСТОЧНИКАМ (errors.log, gateway.log, ...), история сканов
+хранит "sources": {pattern: [file]}, _learn_module_pairs строит пары
+со-встречаемостей ВНУТРИ одного модуля, predict_module_companions
+предсказывает: «если A сейчас в gateway.log, B исторически приходил в том
+же gateway.log — вероятен следующим». Агрегат scan_logs не изменился
+(backward compat: сумма по источникам).
+
 v4 (11.08.2026): предсказание по КОНТЕКСТУ (grow point 11.08: «не только
 по тексту ошибки»). Из истории сканов строится карта пар со-встречаемостей:
 если паттерн A исторически приходил в одном скане с B (gateway_timeout +
@@ -126,30 +135,49 @@ def _active_patterns(data: dict) -> dict:
 
 
 def scan_logs(data: dict, max_lines=2000) -> dict:
-    """Сканирует логи, извлекает паттерны ошибок.
+    """Сканирует логи, извлекает паттерны ошибок (агрегат по источникам).
 
     Считает СТРОКИ с ошибкой (не совпадения): если строка содержит два
     альтернативных матча паттерна (FileNotFoundError + No such file...),
-    она учитывается один раз.
+    она учитывается один раз. v5: агрегат = сумма по scan_logs_by_source,
+    чтобы источники и агрегат никогда не расходились.
     """
     matches = Counter()
+    for src, pats in scan_logs_by_source(data, max_lines).items():
+        for name, count in pats.items():
+            matches[name] += count
+    return dict(matches.most_common())
+
+
+def scan_logs_by_source(data: dict, max_lines=2000) -> dict:
+    """Сканирует логи, возвращает матчи ПО ИСТОЧНИКАМ (лог-файл/сервис).
+
+    Структура: {source_name: {pattern: count}}. source_name — имя лог-файла
+    (errors.log, gateway.log, ...), "supervisor" для SUPERVISOR_LOG или
+    "session" для сессионных файлов. Источники без матчей отсутствуют
+    в результате. На основе этого v5 предсказывает парные паттерны в
+    пределах ОДНОГО модуля (predict_module_companions).
+    """
+    by_source = {}
     files_to_scan = []
     if SUPERVISOR_LOG.exists():
-        files_to_scan.append(SUPERVISOR_LOG)
+        files_to_scan.append(("supervisor", SUPERVISOR_LOG))
     for name in LOG_FILES:
         p = LOG_DIR / name
         if p.exists():
-            files_to_scan.append(p)
+            files_to_scan.append((name, p))
     if SESSION_DIR.exists():
-        files_to_scan.extend(sorted(SESSION_DIR.glob("session_*.json"), reverse=True)[:5])
+        for sp in sorted(SESSION_DIR.glob("session_*.json"), reverse=True)[:5]:
+            files_to_scan.append(("session", sp))
 
     compiled = {name: re.compile(p, re.IGNORECASE) for name, p in _active_patterns(data).items()}
-    for f in files_to_scan:
+    for src, f in files_to_scan:
         if f == SUPERVISOR_LOG:
             content = str(f.read_text())[-max_lines * 200:]
         else:
             content = _tail_text(f)
         lines = content.splitlines()
+        src_counter = Counter()
         for name, rx in compiled.items():
             if name.startswith("learned_"):
                 # Выученные паттерны хранятся в НОРМАЛИЗОВАННОМ виде (числа→N,
@@ -161,8 +189,10 @@ def scan_logs(data: dict, max_lines=2000) -> dict:
             else:
                 found = sum(1 for line in lines if rx.search(line))
             if found:
-                matches[name] += found
-    return dict(matches.most_common())
+                src_counter[name] = found
+        if src_counter:
+            by_source[src] = dict(src_counter)
+    return by_source
 
 
 def _normalize_line(line: str) -> str:
@@ -311,6 +341,86 @@ def predict_companions(data: dict, current_matches: dict,
     } for b, c in ranked]
 
 
+def _learn_module_pairs(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
+    """Пары со-встречаемостей паттернов ПО МОДУЛЯМ (лог-файлам).
+
+    v5. Возвращает {source: {a: {b: count}}}: для каждой записи истории и
+    каждого источника (лог-файла) паттерны, найденные в ЭТОМ источнике,
+    попарно инкрементятся в обе стороны. В отличие от _learn_cooccurrences
+    (пары в скане вообще), пара привязана к модулю: (a,b) в gateway.log
+    значит «a и b приходили вместе именно в gateway.log». Прогноз по парам
+    другого модуля исключён. Пары с частотой < min_pairs отбрасываются.
+    Записи без "sources" (legacy/повреждённые) пропускаются.
+    """
+    per_src: dict = {}
+    for h in data.get("history", []):
+        sources = h.get("sources") or {}
+        for src, pats in sources.items():
+            if not pats:
+                continue
+            names = [n for n, c in pats.items() if c > 0]
+            pairs = per_src.setdefault(src, {})
+            for i in range(len(names)):
+                a = names[i]
+                for b in names[i + 1:]:
+                    pairs.setdefault(a, {}).setdefault(b, 0)
+                    pairs[a][b] += 1
+                    pairs.setdefault(b, {}).setdefault(a, 0)
+                    pairs[b][a] += 1
+    # Отбрасываем пары < min_pairs; источник держим только если после
+    # фильтра остались пары (иначе {src: {}} засорял бы карту)
+    out: dict = {}
+    for src, pairs in per_src.items():
+        filtered = {a: {b: c for b, c in bs.items() if c >= min_pairs}
+                    for a, bs in pairs.items()
+                    if any(c >= min_pairs for c in bs.values())}
+        if filtered:
+            out[src] = filtered
+    return out
+
+
+def predict_module_companions(data: dict, current_sources: dict,
+                              min_pairs: int = COOCCUR_MIN_PAIRS,
+                              max_companions: int = MAX_COMPANIONS) -> list:
+    """Предсказывает паттерны, исторически приходящие в ТОТ ЖЕ модуль.
+
+    v5. current_sources: {source: {pattern: count}} — результат свежего
+    скана по источникам (scan_logs_by_source). Для каждого источника берутся
+    пары, выученные ИМЕННО ДЛЯ ЭТОГО источника (module_cooccurrences[src]);
+    кандидаты — парные паттерны присутствующих, ещё не найденные в этом
+    модуле. Пары из других модулей в прогноз не попадают — предсказание
+    сужено до сервиса. Возвращает до max_companions кандидатов
+    {pattern, source, co_score}, отсортированных по убыванию co_score;
+    source — модуль, где кандидат ожидается.
+    """
+    per_src = data.get("module_cooccurrences")
+    if not per_src:
+        per_src = _learn_module_pairs(data, min_pairs)
+    # pattern -> (source, score): держим лучший (макс. co_score) источник
+    best: dict = {}
+    for src, pats in (current_sources or {}).items():
+        present = {n for n, c in (pats or {}).items() if c > 0}
+        if not present:
+            continue
+        pairs = per_src.get(src) or {}
+        for a in present:
+            for b, cnt in (pairs.get(a) or {}).items():
+                if b in present:
+                    continue
+                cur = best.get(b)
+                if cur is None or cnt > cur[1]:
+                    best[b] = (src, cnt)
+    ranked = sorted(best.items(), key=lambda kv: -kv[1][1])[:max_companions]
+    return [{
+        "pattern": b,
+        "source": src,
+        "co_score": cnt,
+        "message": (f"Паттерн '{b}' исторически появляется в одном модуле с "
+                    f"текущими ошибками ({cnt} совместных вхождений). "
+                    f"Ожидается в {src}."),
+    } for b, (src, cnt) in ranked]
+
+
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
     """Тренд появления паттерна по последним сканам: rising / stable / falling / new.
 
@@ -377,7 +487,12 @@ def update_patterns() -> dict:
     """Главная функция: сканирует, обновляет, предсказывает."""
     timestamp = time.time()
     data = _load_data()
-    matches = scan_logs(data)
+    matches_by_source = scan_logs_by_source(data)
+    # Агрегат (v4/backward compat): сумма по источникам
+    matches = {}
+    for src, pats in matches_by_source.items():
+        for name, count in pats.items():
+            matches[name] = matches.get(name, 0) + count
 
     # Обновляем streaks — СЧЁТЧИК СКАНОВ, где паттерн присутствовал (не сырые
     # совпадения: при статичном errors.log они росли бы бесконечно).
@@ -390,11 +505,12 @@ def update_patterns() -> dict:
             streaks[name] = max(0, streaks.get(name, 0) - 1)
     data["streaks"] = streaks
 
-    # Добавляем в историю
+    # Добавляем в историю (v5: sources — разбивка по лог-файлам/сервисам)
     data["history"].append({
         "timestamp": timestamp,
         "error_count": sum(matches.values()),
         "patterns": matches,
+        "sources": matches_by_source,
     })
     data["history"] = data["history"][-100:]
 
@@ -426,6 +542,12 @@ def update_patterns() -> dict:
     companions = predict_companions(data, matches)
     data["companions"] = companions
 
+    # Контекст по МОДУЛЮ (v5): пары в пределах одного лог-файла/сервиса,
+    # прогноз с привязкой к источнику (в каком модуле ждать паттерн).
+    data["module_cooccurrences"] = _learn_module_pairs(data)
+    module_companions = predict_module_companions(data, matches_by_source)
+    data["module_companions"] = module_companions
+
     data["last_update"] = timestamp
     with open(PATTERNS_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -436,7 +558,9 @@ def update_patterns() -> dict:
         "streaks": streaks,
         "risks": risks,
         "companions": companions,
+        "module_companions": module_companions,
         "cooccurrence_pairs": sum(len(v) for v in data["cooccurrences"].values()),
+        "module_cooccurrence_pairs": sum(len(v) for v in data["module_cooccurrences"].values()),
         "learned_total": len(data.get("learned_patterns", [])),
         "learned_new": added,
         "learned_refreshed": refreshed,
@@ -471,7 +595,13 @@ def get_report() -> str:
         for c in result["companions"]:
             lines.append(f"    → {c['pattern']} (co-score {c['co_score']})")
 
-    if not result["matches"] and not result["risks"] and not result.get("companions"):
+    if result.get("module_companions"):
+        lines.append("  🎯 Прогноз по модулям:")
+        for c in result["module_companions"]:
+            lines.append(f"    → {c['pattern']} в {c['source']} (co-score {c['co_score']})")
+
+    if not result["matches"] and not result["risks"] and not result.get("companions") \
+            and not result.get("module_companions"):
         lines.append("  ✅ Новых паттернов ошибок не найдено.")
 
     return "\n".join(lines)
