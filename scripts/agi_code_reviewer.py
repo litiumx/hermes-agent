@@ -49,6 +49,13 @@ EXFIL_PATTERNS = {
     r"cat\s+[^\n]*\.kube/config\b": "чтение kubeconfig",
     r"cat\s+[^\n]*\.ssh/id_(rsa|ed25519|ecdsa)\b": "чтение SSH-ключей",
     r"cat\s+[^\n]*\.env\b": "чтение .env (секреты)",
+    r"\bcurl\b[^\n]*(--data-binary|--data|--form|-d|-F)[^\n]*@[^\s\"']+":
+        "curl отправляет файл наружу (-d/-F @file) — эксфильтрация",
+    r"\bcurl\b[^\n]*(-T|--upload-file)\s+[^\s\"']+":
+        "curl -T/--upload-file — загрузка файла на remote (эксфильтрация)",
+    r"\bcat\s+[^\n]*\|\s*nc\b": "cat | nc — отправка файла по сети (эксфильтрация)",
+    r"\bscp\b[^\n]*\s[^\s-][^\s]*\.(env|pem|key)\s+[^\n]*@":
+        "scp секретного файла на удалённый хост (эксфильтрация)",
 }
 
 # Персистентность: инъекция крона, автозапуск, git hooks, перехват кредов,
@@ -61,6 +68,12 @@ PERSIST_PATTERNS = {
     r"git\s+config\b[^\n]*credential": "git config credential — перехват кредов",
     r">>\s*~?/\.(bashrc|profile|zshrc)\b": "дописывание в .bashrc/.profile — персистентность",
     r"pip[23]?\s+install\b[^\n]*(--index-url|--extra-index-url)": "pip install с чужим index — возможный typosquat",
+    r"pip[23]?\s+install\b(?!\s+[^\n]*git\+)[^\n]*https?://[^\s\"']+":
+        "pip install с URL — произвольный код из сети (typosquat)",
+    r"git\s+config\b[^\n]*insteadOf": "git config insteadOf — перехват remote",
+    r"/etc/systemd/system/[^\s\"']*\.service": "запись systemd unit — персистентность",
+    r"(curl|wget)\s+[^\n]*-[oO]\s*/?(etc/|usr/local/bin|usr/bin|opt/|root/)":
+        "скачивание в системную директорию (-o /etc, /usr/local/bin...) — персистентность",
 }
 
 # Хорошие паттерны (regex → похвала)
