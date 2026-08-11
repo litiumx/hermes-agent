@@ -40,3 +40,44 @@ FAIL на total/op_counts — урок: absolute counts требуют изол�
 - audit_integrity: добавить сверку last_id в summary против MAX(id) лога
   (сейчас stale считается по total_events — для точности хватит, но last_id
   уже хранится в summary — можно сверять оба)
+
+---
+
+## AGI Coding Cycle 16 (дописано кроном 11.08, репо hermes-agent)
+
+### Цель
+Grow point 11.08: «error_pattern_learner v5: контекст по МОДУЛЮ (какой
+лог-файл/сервис дал ошибку) — сузить предсказания до сервиса».
+
+### Сделано (коммит 2b996a5, ветка master, push выполнен)
+1. **scan_logs_by_source(data)** — матчи ПО ИСТОЧНИКАМ: {errors.log: {pattern:
+   count}, gateway.log: ..., supervisor, session}. scan_logs стал агрегатом
+   поверх него (backward compat, два пути не расходятся).
+2. **История сканов хранит "sources"** — разбивка матчей по лог-файлам.
+3. **_learn_module_pairs(data)** — {source: {a: {b: count}}}: пары паттернов
+   В ПРЕДЕЛАХ ОДНОГО лог-файла (не «в скане вообще», как v4). Пара (a,b) в
+   gateway.log значит «a и b приходили вместе именно в gateway.log».
+4. **predict_module_companions(data, current_sources)** — прогноз только по
+   парам ТОГО ЖЕ источника: «connection_refused в gateway.log → ждать
+   gateway_timeout там же». Пары из других модулей не протекают.
+5. **agi_test_error_pattern_module.py** — 23 проверки: разбивка по
+   источникам, backward compat агрегата, изоляция кросс-модульных пар,
+   порог min_pairs (включая баг {src: {}} после фильтра), legacy-записи,
+   исключение присутствующих, пустые входы, лимит+сортировка, интеграция
+   через 3 прогона update_patterns.
+6. Регрессия: 23/23 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (exfil 0 / persist 0 / danger 0). E2E smoke: update через CLI ок.
+
+### Урок
+- Сначала сделал пары глобальными, а источник приписывал «на глаз» — пары
+  gateway.log протекали в errors.log (тест поймал: source='errors.log' при
+  отсутствии истории там). Правильная модель: карта пар по-модульная
+  {source: {a: {b: count}}}, прогноз читает ТОЛЬКО пары своего модуля.
+- Фильтр порога в dict-comprehension проверял исходный словарь, а не
+  отфильтрованный — оставался {src: {}}. Отдельный цикл с filtered.
+
+### Grow points (следующие циклы)
+- curious_agent: вывод устаревших тем по last_researched + score
+- Saucedo Multi-Tier Memory: medium/long-term tier в context_store
+- error_pattern_learner v6: ttl/свежесть пар (пары из старых сканов
+  взвешивать ниже) или источники в learned-паттернах
