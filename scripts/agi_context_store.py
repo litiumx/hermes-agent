@@ -60,9 +60,29 @@ def _ensure_db():
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
+        # Append-only audit лог (OptMem-паттерн): строки НИКОГДА не
+        # редактируются, summary пересобирается из лога (rebuild_summary).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                op TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_summary (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                rebuilt_at REAL NOT NULL,
+                total_events INTEGER NOT NULL,
+                last_id INTEGER NOT NULL,
+                op_counts_json TEXT NOT NULL
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_hash ON pending_tasks(task_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON pending_tasks(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ts ON sessions(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
         conn.commit()
 
 
@@ -81,6 +101,133 @@ def _get_conn():
 
 def _task_hash(task: str) -> str:
     return hashlib.sha256(task.strip().lower().encode()).hexdigest()[:16]
+
+
+# --- Append-only audit лог (OptMem-паттерн) ---
+# Лог — источник истины: строки только добавляются, никогда не меняются.
+# summary — пересобираемый кэш (rebuild_summary) из лога.
+
+def append_audit(op: str, payload: dict = None) -> int:
+    """Добавить событие в append-only лог. Возвращает id (0 — если op невалиден).
+
+    payload сериализуется в JSON; не-JSON-сериализуемое → {}."""
+    if not isinstance(op, str) or not op.strip():
+        return 0
+    _ensure_db()
+    try:
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+    except (TypeError, ValueError):
+        payload_json = "{}"
+    with _get_conn() as conn:
+        cursor = conn.execute(
+            "INSERT INTO audit_log (ts, op, payload_json) VALUES (?, ?, ?)",
+            (time.time(), op.strip(), payload_json),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_audit(limit: int = 50) -> list[dict]:
+    """Последние события лога (новые первыми). limit<=0 → пустой список."""
+    _ensure_db()
+    if limit <= 0:
+        return []
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, ts, op, payload_json FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload_json"])
+            except (ValueError, TypeError):
+                payload = {}
+            out.append({"id": r["id"], "ts": r["ts"], "op": r["op"], "payload": payload})
+        return out
+
+
+def _read_log_counts(conn) -> tuple:
+    """(total, last_id, op_counts) из лога — пересобираемо из источника истины."""
+    total = conn.execute("SELECT COUNT(*) as c FROM audit_log").fetchone()["c"]
+    last_id = conn.execute("SELECT MAX(id) as m FROM audit_log").fetchone()["m"] or 0
+    op_counts = {}
+    for r in conn.execute(
+        "SELECT op, COUNT(*) as c FROM audit_log GROUP BY op"
+    ).fetchall():
+        op_counts[r["op"]] = r["c"]
+    return total, last_id, op_counts
+
+
+def rebuild_summary() -> dict:
+    """Пересобрать summary из лога (идемпотентно). Лог не трогается."""
+    _ensure_db()
+    with _get_conn() as conn:
+        total, last_id, op_counts = _read_log_counts(conn)
+        conn.execute(
+            """INSERT OR REPLACE INTO audit_summary
+               (id, rebuilt_at, total_events, last_id, op_counts_json)
+               VALUES (1, ?, ?, ?, ?)""",
+            (time.time(), total, last_id, json.dumps(op_counts, ensure_ascii=False)),
+        )
+        conn.commit()
+    return get_audit_summary()
+
+
+def get_audit_summary() -> dict:
+    """Текущий summary (без пересборки). Пустой БД → нули."""
+    _ensure_db()
+    with _get_conn() as conn:
+        row = conn.execute("SELECT * FROM audit_summary WHERE id = 1").fetchone()
+    if not row:
+        return {"total_events": 0, "last_id": 0, "op_counts": {},
+                "rebuilt_at": 0.0, "fresh": True}
+    try:
+        op_counts = json.loads(row["op_counts_json"])
+    except (ValueError, TypeError):
+        op_counts = {}
+    return {"total_events": row["total_events"], "last_id": row["last_id"],
+            "op_counts": op_counts, "rebuilt_at": row["rebuilt_at"], "fresh": True}
+
+
+def audit_integrity() -> dict:
+    """Проверка append-only инварианта.
+
+    - ok=False если любая строка лога повреждена (не-JSON payload)
+    - stale=True если лог вырос после последнего rebuild (summary отстаёт,
+      но это НЕ коррупция — summary пересобираем)
+    """
+    _ensure_db()
+    issues = []
+    log_total = 0
+    bad_payload = 0
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, payload_json FROM audit_log ORDER BY id"
+        ).fetchall()
+        log_total = len(rows)
+        for r in rows:
+            try:
+                json.loads(r["payload_json"])
+            except (ValueError, TypeError):
+                bad_payload += 1
+                issues.append(f"row {r['id']}: payload не-JSON")
+        summary = conn.execute(
+            "SELECT total_events, last_id FROM audit_summary WHERE id = 1"
+        ).fetchone()
+
+    summary_events = summary["total_events"] if summary else 0
+    summary_last_id = summary["last_id"] if summary else 0
+    stale = log_total > summary_events or (log_total > 0 and summary is None)
+    ok = bad_payload == 0
+    return {
+        "ok": ok,
+        "stale": stale,
+        "log_events": log_total,
+        "summary_events": summary_events,
+        "summary_last_id": summary_last_id,
+        "issues": issues,
+    }
 
 
 def save_context(context: dict) -> int:
@@ -128,6 +275,9 @@ def save_context(context: dict) -> int:
             )
 
         conn.commit()
+        # Audit: лог — источник истины для всех мутаций
+        append_audit("session_save", {"session_id": session_id,
+                                      "phase": context.get("session_phase", "unknown")})
         return session_id
 
 
@@ -175,7 +325,10 @@ def add_pending_task(task: str, priority: int = 0, source: str = "manual") -> bo
             (th, task, time.time(), priority, source),
         )
         conn.commit()
-        return cursor.rowcount > 0
+        added = cursor.rowcount > 0
+        if added:
+            append_audit("task_add", {"task": task[:80], "priority": priority})
+        return added
 
 
 def remove_pending_task(task: str) -> bool:
@@ -185,7 +338,10 @@ def remove_pending_task(task: str) -> bool:
     with _get_conn() as conn:
         cursor = conn.execute("DELETE FROM pending_tasks WHERE task_hash = ?", (th,))
         conn.commit()
-        return cursor.rowcount > 0
+        removed = cursor.rowcount > 0
+        if removed:
+            append_audit("task_remove", {"task": task[:80]})
+        return removed
 
 
 def age_out_tasks() -> int:
@@ -195,7 +351,10 @@ def age_out_tasks() -> int:
     with _get_conn() as conn:
         cursor = conn.execute("DELETE FROM pending_tasks WHERE created_at < ?", (cutoff,))
         conn.commit()
-        return cursor.rowcount
+        n = cursor.rowcount
+        if n > 0:
+            append_audit("tasks_age_out", {"count": n})
+        return n
 
 
 def prune_old(max_sessions: int = MAX_SESSIONS, snapshot_days: int = SNAPSHOT_TTL_DAYS) -> dict:
@@ -235,6 +394,10 @@ def prune_old(max_sessions: int = MAX_SESSIONS, snapshot_days: int = SNAPSHOT_TT
         ).rowcount
         conn.commit()
 
+    if removed_sessions or removed_snapshots:
+        append_audit("prune", {"sessions": removed_sessions,
+                               "snapshots": removed_snapshots})
+
     return {"sessions": removed_sessions, "snapshots": removed_snapshots}
 
 
@@ -257,12 +420,14 @@ def get_stats() -> dict:
         total_sessions = conn.execute("SELECT COUNT(*) as c FROM sessions").fetchone()["c"]
         active_tasks = conn.execute("SELECT COUNT(*) as c FROM pending_tasks").fetchone()["c"]
         snapshots = conn.execute("SELECT COUNT(*) as c FROM context_snapshots").fetchone()["c"]
+        audit_events = conn.execute("SELECT COUNT(*) as c FROM audit_log").fetchone()["c"]
         db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
 
     return {
         "total_sessions": total_sessions,
         "active_tasks": active_tasks,
         "snapshots": snapshots,
+        "audit_events": audit_events,
         "db_size_kb": db_size // 1024,
         "task_ttl_hours": TASK_TTL_HOURS,
     }
@@ -348,6 +513,22 @@ if __name__ == "__main__":
             for h in get_session_history(hours):
                 ts = time.strftime("%d.%m %H:%M", time.localtime(h["timestamp"]))
                 print(f"[{ts}] [{h['session_phase']}] {h['last_task'][:60]}")
+        elif cmd == "audit":
+            limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+            for e in get_audit(limit):
+                ts = time.strftime("%d.%m %H:%M", time.localtime(e["ts"]))
+                p = json.dumps(e["payload"], ensure_ascii=False)[:80]
+                print(f"[{ts}] #{e['id']} {e['op']} {p}")
+        elif cmd == "audit-rebuild":
+            s = rebuild_summary()
+            print(f"Rebuilt: total={s['total_events']}, "
+                  f"op_counts={json.dumps(s['op_counts'], ensure_ascii=False)}")
+        elif cmd == "audit-check":
+            r = audit_integrity()
+            print(f"ok={r['ok']} stale={r['stale']} "
+                  f"log={r['log_events']} summary={r['summary_events']}")
+            for i in r["issues"]:
+                print(f"  ISSUE: {i}")
         else:
             print(get_report())
     else:
