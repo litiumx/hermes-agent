@@ -152,7 +152,10 @@ def search_sessions(query, limit=5):
     # 1) Реальный session store Hermes — state.db
     state_db = find_state_db()
     if state_db:
-        return search_state_db(state_db, query, limit)
+        try:
+            return search_state_db(state_db, query, limit)
+        except sqlite3.Error as e:
+            print(f"  ⚠️ state.db повреждён ({e}) — fallback на sessions.db", file=sys.stderr)
 
     # 2) Fallback: собственная sessions.db (legacy)
     if os.path.isfile(DB):
