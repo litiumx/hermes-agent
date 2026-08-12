@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """agi_error_pattern_learner.py — автономный предсказатель ошибок.
 
+v6 (12.08.2026): временной DECAY паттернов (grow point 12.08: «старые
+streaks весят меньше свежих»). _decay_scores считает recency-взвешенный
+score присутствия: каждый скан истории даёт вес 0.5^(age/half_life) —
+вчерашний скан ≈1.0, двухмесячный ≈0. Стреак, бушевавший давно, больше
+не даёт HIGH-риск: predict_risks требует decay_score >= RISK_DECAY_FLOOR
+(2.0) для high, иначе low. decay_score пишется в каждый риск и
+персистится в patterns.json (decay_scores) для потребителей очереди.
+
 v5 (11.08.2026): контекст по МОДУЛЮ (grow point 11.08: «какой лог-файл/
 сервис дал ошибку — сузить предсказания до сервиса»). scan_logs_by_source
 считает матчи ПО ИСТОЧНИКАМ (errors.log, gateway.log, ...), история сканов
@@ -90,6 +98,8 @@ MIN_OCCURRENCES = 3
 LEARNED_TTL_DAYS = 14  # learned-паттерн без появлений дольше этого — удаляется
 COOCCUR_MIN_PAIRS = 2   # пара паттернов считается значимой после N совместных сканов
 MAX_COMPANIONS = 3      # сколько парных паттернов предсказывать за раз
+STREAK_HALF_LIFE_DAYS = 14  # v6: вес присутствия в скане падает вдвое за N дней
+RISK_DECAY_FLOOR = 2.0      # v6: min decay_score для риска high (2 свежих скана)
 
 try:
     PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -446,27 +456,62 @@ def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
     return "stable"
 
 
+def _decay_scores(data: dict, half_life_days: float = STREAK_HALF_LIFE_DAYS) -> dict:
+    """Recency-взвешенный score присутствия паттернов (v6).
+
+    Каждый скан истории, где паттерн присутствовал (count > 0), даёт вес
+    0.5 ** (age_days / half_life_days): свежий скан ≈1.0, на возрасте
+    half_life — 0.5, дальше экспоненциально меньше. Старые streaks больше
+    не весят как свежие: паттерн, бушевавший 2 месяца назад, даёт ~0, а
+    вчерашний — почти полный вес. Считается ПРИСУТСТВИЕ, не объём (count=3
+    в скане == count=1), чтобы score был сопоставим со streak. Сканы без
+    timestamp трактуются как свежие (консервативно: не занижать вес).
+    Записи без "patterns" (legacy/повреждённые) пропускаются молча.
+    """
+    now = time.time()
+    hl = half_life_days * 86400
+    scores: dict = {}
+    for h in data.get("history", []):
+        pats = h.get("patterns")
+        if not pats:
+            continue
+        age = now - h.get("timestamp", now)
+        if age < 0:  # битый timestamp в будущем — не занижаем вес
+            age = 0
+        w = 0.5 ** (age / hl)
+        for name, count in pats.items():
+            if count > 0:
+                scores[name] = scores.get(name, 0.0) + w
+    return scores
+
+
 def predict_risks(data: dict) -> list:
     """Предсказывает вероятные проблемы на основе истории.
 
     HIGH — только для растущих/стабильных паттернов; падающие (пропадают
-    из свежих сканов) понижаются до low, чтобы не засорять очередь задач.
+    из свежих сканов) понижаются до low. v6: временной decay — старый
+    streak (появления давно, decay_score < RISK_DECAY_FLOOR) тоже даёт low:
+    «встречался 3 раза месяц назад» ≠ активный риск. decay_score пишется
+    в каждый риск для потребителей (self_directed_queue).
     """
     history = data.get("history", [])
     if len(history) < 3:
         return []
 
+    decays = _decay_scores(data)
     risks = []
     for pattern, count in data.get("streaks", {}).items():
         if count >= 3:
             trend = _pattern_trend(data, pattern)
-            risk = "high" if trend != "falling" else "low"
+            decay = decays.get(pattern, 0.0)
+            risk = "high" if trend != "falling" and decay >= RISK_DECAY_FLOOR else "low"
             risks.append({
                 "risk": risk,
                 "pattern": pattern,
                 "trend": trend,
+                "decay_score": decay,
                 "message": (f"Паттерн '{pattern}' встречался в {count} последних сканах "
-                            f"(тренд: {trend}). Вероятен повтор."),
+                            f"(тренд: {trend}, decay: {decay:.1f}). Вероятен повтор."),
                 "suggestion": _SUGGESTIONS.get(pattern, "Проверить соответствующие сервисы."),
             })
 
@@ -531,6 +576,7 @@ def update_patterns() -> dict:
     # читают ГОТОВЫЙ trend-aware результат, не скатываясь в наивный
     # streak-логик (фикс: очередь всё ещё плодила 8 одинаковых задач
     # "streak: 7", хотя predict_risks уже умел тренды).
+    data["decay_scores"] = _decay_scores(data)  # v6: recency-веса для потребителей
     risks = predict_risks(data)
     data["trends"] = {r["pattern"]: r["trend"] for r in risks if r.get("pattern")}
     data["risks"] = risks
@@ -556,6 +602,7 @@ def update_patterns() -> dict:
         "status": "ok",
         "matches": matches,
         "streaks": streaks,
+        "decay_scores": data["decay_scores"],
         "risks": risks,
         "companions": companions,
         "module_companions": module_companions,
@@ -583,7 +630,8 @@ def get_report() -> str:
         lines.append("  ⚠️ Риски:")
         for r in result["risks"]:
             trend = f" ({r.get('trend', '?')})" if r.get("trend") else ""
-            lines.append(f"    {r['risk'].upper()}{trend}: {r.get('message', '')}")
+            dec = f" [decay {r['decay_score']:.1f}]" if "decay_score" in r else ""
+            lines.append(f"    {r['risk'].upper()}{trend}{dec}: {r.get('message', '')}")
             if r.get("suggestion"):
                 lines.append(f"      → {r['suggestion']}")
 
