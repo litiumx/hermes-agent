@@ -364,6 +364,16 @@ def get_report() -> str:
             sources = len(f.get("sources", []))
             lines.append(f"    [{ts}] {topic} ({sources} источников)")
 
+    stale = get_stale_topics(knowledge, max_age_days=30)
+    if stale:
+        lines.append(f"\n  🕸 Устаревших тем (>{30} дн.): {len(stale)}")
+        for s in stale[:3]:
+            lines.append(f"    [{s['age_days']} дн., score {s['score']:.1f}] {s['topic'][:60]}")
+        if len(stale) > 3:
+            lines.append(f"    … и ещё {len(stale) - 3}")
+    else:
+        lines.append("\n  🕸 Устаревших тем: нет")
+
     return "\n".join(lines)
 
 
@@ -384,6 +394,80 @@ def search_knowledge(query: str) -> list[dict]:
                     break
 
     return results
+
+
+def _topic_score(finding) -> float:
+    """Оценка ценности находки (для решения stale: выбросить vs re-research).
+
+    score = число источников (cap 5) + 0.5 за каждый источник с непустым
+    snippet. Битые записи (не dict / без sources) → 0.0.
+    """
+    if not isinstance(finding, dict):
+        return 0.0
+    sources = finding.get("sources")
+    if not isinstance(sources, list):
+        return 0.0
+    n = min(len(sources), 5)
+    any_snippet = any(
+        isinstance(s, dict) and s.get("snippet") for s in sources
+    )
+    return float(n) + (0.5 if any_snippet else 0.0)
+
+
+def get_stale_topics(knowledge: dict | None = None,
+                     max_age_days: float = 30) -> list[dict]:
+    """Темы, исследованные давно (last_researched старше max_age_days).
+
+    Возвращает список {"topic", "age_days", "score"} — самые старые первыми,
+    при равном возрасте — меньший score первым (кандидаты на выброс/ре-поиск).
+    Записи без timestamp / не-dict консервативно НЕ считаются stale
+    (нет данных о возрасте — не трогаем).
+    """
+    if knowledge is None:
+        knowledge = load_knowledge()
+    cutoff = time.time() - max_age_days * 86400
+    stale = []
+    for f in knowledge.get("findings", []):
+        if not isinstance(f, dict):
+            continue
+        ts = f.get("timestamp")
+        if not isinstance(ts, (int, float)):
+            continue
+        if ts > cutoff:
+            continue
+        stale.append({
+            "topic": f.get("topic", ""),
+            "age_days": round((time.time() - ts) / 86400, 1),
+            "score": _topic_score(f),
+        })
+    stale.sort(key=lambda s: (-s["age_days"], s["score"]))
+    return stale
+
+
+def prune_stale_topics(max_age_days: float = 60, min_score: float = 1.0) -> dict:
+    """Удалить устаревшие находки с низкой ценностью.
+
+    stale + score < min_score → удаляются (и из topics_searched). Свежие и
+    stale-ценные (score >= min_score) остаются — они кандидаты на re-research
+    через directed-очередь, а не на выброс. Идемпотентно.
+    """
+    knowledge = load_knowledge()
+    cutoff = time.time() - max_age_days * 86400
+    kept, removed = [], []
+    for f in knowledge.get("findings", []):
+        is_stale = (isinstance(f, dict) and isinstance(f.get("timestamp"), (int, float))
+                    and f["timestamp"] <= cutoff)
+        if is_stale and _topic_score(f) < min_score:
+            removed.append(f.get("topic", ""))
+        else:
+            kept.append(f)
+    removed_set = set(removed)
+    knowledge["findings"] = kept
+    knowledge["topics_searched"] = [
+        t for t in knowledge.get("topics_searched", []) if t not in removed_set
+    ]
+    save_knowledge(knowledge)
+    return {"removed": len(removed), "kept": len(kept)}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -410,6 +494,17 @@ def main(argv: list[str] | None = None) -> None:
             print("Usage: agi_curious_agent.py topic <topic>")
             sys.exit(1)
         result = run_research(force=True, topics_override=[topic])
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif argv and argv[0] == "stale":
+        # Список устаревших тем (кандидаты на re-research или выброс)
+        max_age = float(argv[1]) if len(argv) > 1 else 30.0
+        stale = get_stale_topics(max_age_days=max_age)
+        print(json.dumps(stale, indent=2, ensure_ascii=False))
+    elif argv and argv[0] == "prune":
+        # Удалить stale-находки с низким score
+        max_age = float(argv[1]) if len(argv) > 1 else 60.0
+        min_score = float(argv[2]) if len(argv) > 2 else 1.0
+        result = prune_stale_topics(max_age_days=max_age, min_score=min_score)
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         result = run_research()
