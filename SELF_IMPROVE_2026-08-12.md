@@ -36,3 +36,124 @@ score». Темы, исследованные давно, оставались �
   как directed re-research задачи автоматически
 - Saucedo Multi-Tier Memory: medium/long-term tier в context_store
 - error_pattern_learner v6: предсказание по МОДУЛЮ + временной decay паттернов
+
+---
+
+## AGI Coding Cycle 18 (дописано кроном 12.08, репо hermes-agent)
+
+### Цель
+Grow point 17: «Связать stale-топики с self_directed_queue: prune → enqueue
+stale+ценные как directed re-research задачи автоматически». Раньше prune
+оставлял ценные stale-темы «кандидатами» в комментарии, но никуда их не
+ставил — очередь узнавала о них только через age-based stale_topics (24ч).
+
+### Сделано (коммит 2a8d4e5, ветка master, push выполнен f2b9639..2a8d4e5)
+1. **`enqueue_topic(topic, priority, source)`** в agi_self_directed_queue —
+   прямое добавление directed re-research задачи в QUEUE_FILE минуя
+   build_queue: dedup по тексту задачи, кулдаун DEFAULT_COOLDOWN по
+   истории исполнения, пустая/не-str тема → False без записи.
+2. **`prune_stale_topics`** теперь возвращает `re_research`: список
+   {"topic", "age_days", "score"} сохранённых stale-ценных тем (старые
+   первыми, при равном возрасте — меньший score первым). Совместимо со
+   старым контрактом {"removed", "kept"}.
+3. **`enqueue_re_research(re_research, max_topics=3)`** — ленивый импорт
+   queue-модуля (песочница без него не роняет prune, error в отчёте);
+   приоритет растёт с возрастом: min(30 + age_days*2, 55).
+4. **CLI `prune [max_age] [min_score] [0]`** — авто-enqueue ценных
+   stale-тем в очередь (argv[3]=="0" отключает; ключ
+   re_research_enqueued всегда присутствует, disabled=True при отключении).
+5. **agi_test_queue_stale_enqueue.py** — 12 проверок: enqueue базовый/
+   dedup/кулдаун/кулдаун-истёк/границы, re_research состав и сортировка,
+   end-to-end prune→queue, CLI-интеграция, отключение через "0".
+6. Регрессия: 25/25 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (exfil 0 / persist 0 / danger 0) — review_diff на git diff HEAD
+   (ревьюер умеет только коммиты, рабочий diff прогнан напрямую).
+
+### Урок
+- Ревьюер agi_code_reviewer принимает только commit-ref, для dogfooding
+  незакоммиченного диффа — review_diff(git diff HEAD) напрямую.
+- save_queue/load_queue перезаписывают QUEUE_FILE: тест-файл с одним
+  "history" без "queue" → KeyError при чтении — читать через .get("queue", []).
+
+### Grow points (следующие циклы)
+- error_pattern_learner v6: временной decay паттернов (старые streaks
+  весят меньше свежих)
+- Saucedo Multi-Tier Memory: medium/long-term tier в context_store
+- curious_agent: исследование по теме ИЗ текста задачи (topic-аргумент
+  уже пробрасывается run_next — проверить что knowledge_gap-задачи тоже
+  получают конкретную тему)
+
+---
+
+## OCTOPUS RESEARCH 2026-08-12 (append из cron-песочницы)
+
+### APPLY — инсайты дня
+1. **Agent budget guards (кейс DN42: $6,531 за сутки)**: паттерн отказа — goal-optimisation без
+   judgement constraints, нет spend caps, нет канала человеческого отказа, оператор сам снял
+   предохранитель командой "continue immediately without delay". Индустрия вводит hard caps на
+   траты агентов (Anthropic). Урок для Hermes: сохранять явные бюджетные гарды (лимит $ на поиск,
+   Two-strike rule, /effort) — НЕ давать субагентам/кронам автономию на платные действия без
+   подтверждения. Проверить: у delegate_task-воркеров нет доступа к платным API без лимита.
+2. **Edge agentic LLM (Needle2, 14MB, 45M @2bit, 500 tok/s на RPi5)**: тренд tool-calling на
+   микрочипах. Кандидат для локальной автоматизации на home-pc/роутере — не для VPS (там Pro/Flash).
+3. **Memory-рынок консолидируется**: agent-memory-leaderboard (бенчмарки), Compartment
+   (encrypted offline memory — ответ на MemGhost), memmy-agent (shared memory hub для всех агентов).
+   Для Hermes memory tool: идея self-curation (ByteRover) и шифрование чувствительной памяти —
+   справочно, без немедленных изменений.
+4. **Provenance правок (Human vs AI, line-level diff)**: для аудита агентских изменений в файлах —
+   справочно.
+
+### Grow points (12.08 → 13.08, осьминог)
+- Budget guards: hard caps провайдеров + паттерны cost-control — как строить spend caps и канал отказа для cron
+- Needle2/edge LLM: крошечные tool-calling модели vs LFM2.5 230M — практика и бенчи
+- Memory leaderboard + Compartment + memmy-agent: выбор системы памяти по бенчмаркам и безопасности
+
+---
+
+## AGI Coding Cycle 19 (дописано кроном 12.08, репо hermes-agent)
+
+### Цель
+Grow point 18: «error_pattern_learner v6: временной decay паттернов (старые
+streaks весят меньше свежих)». Голый streak не различал «бушевало вчера» и
+«бушевало 2 месяца назад»: паттерн со streak=7 из старых сканов держал
+HIGH-риск и плодил задачи в очереди.
+
+### Сделано (коммит 9ed5536, ветка master, push выполнен)
+1. **`_decay_scores(data, half_life_days=14)`** — recency-взвешенный score
+   присутствия: каждый скан истории даёт вес 0.5^(age/half_life). Свежий
+   скан ≈1.0, на 14 днях — 0.5, на 60 — ~0.05. Считается ПРИСУТСТВИЕ
+   (count>0), не объём — сопоставимо со streak. Сканы без timestamp —
+   свежие (консервативно), битые timestamp в будущем — age=0, записи без
+   patterns пропускаются.
+2. **predict_risks v6**: high только если trend != falling И
+   decay_score >= RISK_DECAY_FLOOR (2.0). Старый streak (3 появления 60
+   дней назад, trend rising) → low: «встречался давно» ≠ активный риск.
+   В каждый риск добавлен decay_score.
+3. **Персист**: patterns.json получает decay_scores (карта паттерн→вес) —
+   потребители (self_directed_queue) видят recency без пересчёта;
+   update_patterns() возвращает decay_scores.
+4. **get_report**: риски показывают [decay N.N].
+5. **agi_test_error_pattern_decay.py** — 14 проверок: пустая история,
+   свежий≈1.0, half-life≈0.5, свежий+2×half-life≈1.25, presence≠volume,
+   отсутствие, timestamp-фолбэк, мульти-карта, старый streak→low +
+   decay<floor, свежий→high + decay>=floor, falling→low (старая семантика),
+   поле decay_score, персист в patterns.json, legacy-записи без краха.
+6. Регрессия: 26/26 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (exfil 0 / persist 0 / danger 0, 53 добавленные строки, review_diff на
+   git diff HEAD).
+
+### Урок
+- pytest не коллектит script-style тесты (sys.exit на import) — регрессию
+  гонять циклом python3 по файлам; детектор успеха у тестов разный
+  ("ALL PASS" / "ALL TESTS PASS (N)" / "RESULT: N passed" / "OK" unittest)
+  — ловить по отсутствию FAIL-маркеров + rc==0.
+- Репозиторная SELF_IMPROVE_2026-08-12.md отставала от песочной (цикл 18
+  + octopus не были закоммичены) — синхронизировал полной копией перед
+  аппендом.
+
+### Grow points (следующие циклы)
+- Saucedo Multi-Tier Memory: medium/long-term tier в context_store
+- curious_agent: исследование по теме ИЗ текста задачи (topic-аргумент
+  уже пробрасывается run_next — проверить knowledge_gap-задачи)
+- cooccurrences тоже с decay: пары со-встречаемостей взвешивать по
+  recency (сейчас все пары равны)
