@@ -78,7 +78,8 @@ assert res["status"] == "done", res
 assert captured["cmd"][-2:] == ["topic", "stale X"], captured["cmd"]
 print("TEST 1 PASS: run_next передаёт directed-topic в agi_curious_agent.py")
 
-# --- Test 2: generic-задача НЕ получает topic-аргумент ---
+# --- Test 2: knowledge_gap с находкой ПОЛУЧАЕТ topic (цикл 20: самая старая
+# находка → directed re-research); пустая база → generic без topic ---
 clean()
 write(q.KNOWLEDGE_FILE, {
     "findings": [{"topic": "fresh", "timestamp": time.time() - 1 * 3600, "sources": [{"url": "f"}]}],
@@ -90,8 +91,22 @@ subprocess.run = fake_run
 res = q.run_next()
 subprocess.run = orig_run
 assert res["status"] == "done", res
+assert captured["cmd"][-2:] == ["topic", "fresh"], captured["cmd"]
+print("TEST 2a PASS: knowledge_gap с находкой → directed topic 'fresh'")
+
+clean()
+write(q.KNOWLEDGE_FILE, {
+    "findings": [],
+    "topics_searched": [],
+    "last_search": time.time() - 100 * 3600,
+})
+captured.clear()
+subprocess.run = fake_run
+res = q.run_next()
+subprocess.run = orig_run
+assert res["status"] == "done", res
 assert "topic" not in captured["cmd"], captured["cmd"]
-print("TEST 2 PASS: generic research-задача без topic-аргумента (регрессия)")
+print("TEST 2b PASS: knowledge_gap с пустой базой → generic без topic (регрессия)")
 
 # --- Test 3: run_research(topics_override) ре-исследует searched-тему и заменяет находку ---
 clean()

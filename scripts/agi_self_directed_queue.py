@@ -144,13 +144,26 @@ def load_state() -> dict:
                     stale.append({"topic": topic, "age_hours": (now - fts) / 3600})
             stale.sort(key=lambda s: s["age_hours"], reverse=True)
             state["stale_topics"] = stale[:3]
-            # Темы, которые давно не исследовались (fallback: generic задача)
+            # Темы, которые давно не исследовались (fallback: generic задача).
+            # Цикл 20: gap-задача несёт КОНКРЕТНУЮ тему — самую старую находку
+            # (кандидат на re-research). Без валидного timestamp тему не
+            # угадываем (консервативно, как в get_stale_topics).
             if knowledge.get("last_search", 0):
                 hours_since = (now - knowledge["last_search"]) / 3600
                 if hours_since > 6:
+                    dated = [
+                        f for f in knowledge.get("findings", [])
+                        if isinstance(f, dict) and f.get("topic")
+                        and isinstance(f.get("timestamp"), (int, float))
+                    ]
+                    gap_topic = (
+                        min(dated, key=lambda f: f["timestamp"]).get("topic")
+                        if dated else None
+                    )
                     state["knowledge_gaps"].append({
                         "reason": f"Нет исследований {hours_since:.0f} часов",
                         "priority": min(int(hours_since * 5), 50),
+                        "topic": gap_topic,
                     })
         except Exception:
             pass
@@ -242,11 +255,19 @@ def build_queue() -> list[dict]:
             "source": "stale_topic",
         })
 
-    # 4. Исследовательские задачи (generic fallback, если stale тем нет)
+    # 4. Исследовательские задачи (generic fallback, если stale тем нет).
+    # Цикл 20: gap-задача несёт КОНКРЕТНУЮ тему (самую старую находку) —
+    # run_next пробрасывает "for topic: X" в curious_agent topic-режим;
+    # без темы (пустая база) остаётся generic-цикл.
     if not state.get("stale_topics"):
         for gap in state.get("knowledge_gaps", []):
+            topic = gap.get("topic")
+            task_text = (
+                f"Run curious agent research cycle for topic: {topic}"
+                if topic else "Run curious agent research cycle"
+            )
             queue.append({
-                "task": f"Run curious agent research cycle",
+                "task": task_text,
                 "category": "research",
                 "priority": gap.get("priority", 30),
                 "source": "knowledge_gap",

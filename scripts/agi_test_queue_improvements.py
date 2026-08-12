@@ -56,7 +56,7 @@ assert prio["old topic D"] <= 55, prio  # кап
 assert sum(1 for t in queue if t["task"] == "Run curious agent research cycle") == 0, queue
 print("TEST 1 PASS: directed stale-topic задачи, приоритет по возрасту, кап, без generic-дубля")
 
-# --- Test 2: fresh findings → stale нет, generic fallback из knowledge_gaps ---
+# --- Test 2: fresh findings → stale нет, knowledge_gap fallback несёт тему ---
 clean()
 write(q.KNOWLEDGE_FILE, {
     "findings": [{"topic": "fresh", "timestamp": now - 1 * 3600, "sources": []}],
@@ -65,8 +65,9 @@ write(q.KNOWLEDGE_FILE, {
 queue = q.build_queue()
 assert not any(t["source"] == "stale_topic" for t in queue), queue
 gen = [t for t in queue if t["source"] == "knowledge_gap"]
-assert len(gen) == 1 and gen[0]["task"] == "Run curious agent research cycle", queue
-print("TEST 2 PASS: свежие находки → без directed, generic fallback работает")
+# Цикл 20: gap-задача несёт самую старую находку как directed-тему
+assert len(gen) == 1 and gen[0]["task"] == "Run curious agent research cycle for topic: fresh", queue
+print("TEST 2 PASS: свежие находки → без directed, gap fallback с topic работает")
 
 # --- Test 3: dedup по тексту задачи ---
 clean()
