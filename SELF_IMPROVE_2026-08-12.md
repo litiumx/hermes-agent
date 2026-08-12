@@ -1,4 +1,4 @@
-# SELF_IMPROVE — 2026-08-12 (AGI Coding Cycle 17)
+﻿# SELF_IMPROVE — 2026-08-12 (AGI Coding Cycle 17)
 
 ## Цель цикла
 Grow point 11.08: «curious_agent: вывод устаревших тем по last_researched +
@@ -157,3 +157,52 @@ HIGH-риск и плодил задачи в очереди.
   уже пробрасывается run_next — проверить knowledge_gap-задачи)
 - cooccurrences тоже с decay: пары со-встречаемостей взвешивать по
   recency (сейчас все пары равны)
+
+
+---
+
+## AGI Coding Cycle 20 (дописано кроном 12.08, репо hermes-agent)
+
+### Цель
+Grow point 19: «curious_agent: исследование по теме ИЗ текста задачи —
+проверить knowledge_gap-задачи». Проверка показала: stale-темы уже несли
+«for topic: X» (цикл 8), а knowledge_gap-задача оставалась generic — run_next
+не мог пробросить тему, и исследование шло по случайным темам из контекста
+(get_active_topics), часто уже исследованным.
+
+### Сделано (коммит 0c887d3, ветка master)
+1. **load_state**: knowledge_gap получает `topic` — САМАЯ СТАРАЯ находка с
+   валидным timestamp (кандидат на re-research; консервативно: без
+   timestamp тему не угадываем, как в get_stale_topics).
+2. **build_queue**: gap-задача формируется как directed:
+   «Run curious agent research cycle for topic: X»; пустая база → generic
+   без темы. Приоритет не тронут (min(hours*5, 50)).
+3. **run_next**: уже парсил «for topic: X» (цикл 8) — теперь gap-задачи
+   тоже получают topic-аргумент → curious_agent topic-режим с force-оверрайдом.
+4. **agi_test_queue_gap_topic.py** — 6 проверок: самая старая находка,
+   пустая база → generic, находки без timestamp → generic, приоритет cap,
+   run_next end-to-end topic-проброс, регрессия stale_topics→gap не создаётся.
+5. Обновлены старые ожидания: agi_test_directed_topic.py Test 2 → 2a/2b,
+   agi_test_queue_improvements.py Test 2 (gap теперь directed).
+6. Регрессия: 27/27 тестовых файлов PASS (детектор: rc==0 + отсутствие
+   AssertionError/Traceback/FAILED; «FAIL» в ожидаемом выводе тест-кейсов
+   даёт ложные срабатывания — проверять вручную). Dogfooding: verdict
+   ✅ CLEAN (danger 0 / exfil 0 / persist 0, 45 добавленных строк,
+   review_diff на git diff HEAD, 3 файла + новый тест-файл untracked —
+   ревьюер видит только tracked).
+
+### Урок
+- gap-задача = последний «слепой» узел планировщика: все research-пути
+  теперь несут конкретную тему (stale / prune→enqueue / knowledge_gap).
+  Generic-цикл остаётся только на пустой базе знаний — это ок (нет данных,
+  выдумывать тему нечего).
+- Детектор регрессии по grep «FAIL» ненадёжен: тест-кейсы с ожидаемыми
+  FAIL-строками (gateway_guard stale-state) дают false positive. Проверка:
+  rc + AssertionError/Traceback/FAILED + ручной взгляд на итог.
+
+### Grow points (следующие циклы)
+- Saucedo Multi-Tier Memory: medium/long-term tier в context_store
+- cooccurrences тоже с decay: пары со-встречаемостей взвешивать по recency
+  (сейчас все пары равны)
+- knowledge_gap topic: исключать темы, исследованные < N часов назад
+  (сейчас выбирается просто самая старая находка, даже если ей 30 минут)
