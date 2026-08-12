@@ -450,10 +450,13 @@ def prune_stale_topics(max_age_days: float = 60, min_score: float = 1.0) -> dict
     stale + score < min_score → удаляются (и из topics_searched). Свежие и
     stale-ценные (score >= min_score) остаются — они кандидаты на re-research
     через directed-очередь, а не на выброс. Идемпотентно.
+    Возвращает {"removed", "kept", "re_research"}: re_research — список
+    {"topic", "age_days", "score"} сохранённых stale-ценных тем (старые
+    первыми) — их надо закинуть в очередь как re-research задачи.
     """
     knowledge = load_knowledge()
     cutoff = time.time() - max_age_days * 86400
-    kept, removed = [], []
+    kept, removed, re_research = [], [], []
     for f in knowledge.get("findings", []):
         is_stale = (isinstance(f, dict) and isinstance(f.get("timestamp"), (int, float))
                     and f["timestamp"] <= cutoff)
@@ -461,13 +464,47 @@ def prune_stale_topics(max_age_days: float = 60, min_score: float = 1.0) -> dict
             removed.append(f.get("topic", ""))
         else:
             kept.append(f)
+            if is_stale and isinstance(f, dict):
+                re_research.append({
+                    "topic": f.get("topic", ""),
+                    "age_days": round((time.time() - f["timestamp"]) / 86400, 1),
+                    "score": _topic_score(f),
+                })
+    re_research.sort(key=lambda r: (-r["age_days"], r["score"]))
     removed_set = set(removed)
     knowledge["findings"] = kept
     knowledge["topics_searched"] = [
         t for t in knowledge.get("topics_searched", []) if t not in removed_set
     ]
     save_knowledge(knowledge)
-    return {"removed": len(removed), "kept": len(kept)}
+    return {"removed": len(removed), "kept": len(kept), "re_research": re_research}
+
+
+def enqueue_re_research(re_research: list[dict], max_topics: int = 3) -> dict:
+    """Закинуть ценные stale-темы в очередь как directed re-research задачи.
+
+    Ленивый импорт agi_self_directed_queue: если модуль недоступен
+    (изолированная песочница), prune НЕ падает — возвращаем enqueued=0
+    и причину в "error". Приоритет задачи растёт с возрастом темы
+    (cap 55), как в build_queue для stale_topics.
+    """
+    if not re_research:
+        return {"enqueued": 0, "candidates": 0}
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from agi_self_directed_queue import enqueue_topic
+    except Exception as exc:  # noqa: BLE001 — песочница без queue-модуля
+        return {"enqueued": 0, "candidates": len(re_research), "error": str(exc)}
+    enqueued = 0
+    for item in re_research[:max_topics]:
+        topic = item.get("topic", "")
+        if not topic:
+            continue
+        priority = min(30 + int(item.get("age_days", 0) * 2), 55)
+        if enqueue_topic(topic, priority=priority):
+            enqueued += 1
+    return {"enqueued": enqueued, "candidates": min(len(re_research), max_topics)}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -501,10 +538,21 @@ def main(argv: list[str] | None = None) -> None:
         stale = get_stale_topics(max_age_days=max_age)
         print(json.dumps(stale, indent=2, ensure_ascii=False))
     elif argv and argv[0] == "prune":
-        # Удалить stale-находки с низким score
+        # Удалить stale-находки с низким score; ценные stale-темы
+        # автоматически ставятся в очередь как directed re-research
+        # (argv[3] == "0" отключает enqueue).
         max_age = float(argv[1]) if len(argv) > 1 else 60.0
         min_score = float(argv[2]) if len(argv) > 2 else 1.0
         result = prune_stale_topics(max_age_days=max_age, min_score=min_score)
+        if len(argv) <= 3 or argv[3] != "0":
+            result["re_research_enqueued"] = enqueue_re_research(
+                result.get("re_research", []))
+        else:
+            result["re_research_enqueued"] = {
+                "enqueued": 0,
+                "candidates": len(result.get("re_research", [])),
+                "disabled": True,
+            }
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         result = run_research()

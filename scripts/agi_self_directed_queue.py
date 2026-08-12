@@ -390,6 +390,39 @@ def _save_history(history: list[dict]):
     QUEUE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def enqueue_topic(topic: str, priority: int = 45,
+                  source: str = "stale_prune") -> bool:
+    """Напрямую добавить directed re-research задачу в очередь.
+
+    Используется связкой prune → queue (agi_curious_agent): ценные
+    stale-темы после prune попадают в очередь как re-research задачи,
+    минуя build_queue. Правила:
+    - пустая тема → False (без записи)
+    - dedup: тема уже в очереди → False
+    - кулдаун: задача исполнялась за DEFAULT_COOLDOWN часов → False
+    Возвращает True, если задача реально добавлена.
+    """
+    if not isinstance(topic, str) or not topic.strip():
+        return False
+    task_text = f"Run curious agent research cycle for topic: {topic.strip()}"
+    queue = load_queue()
+    if any(t.get("task") == task_text for t in queue):
+        return False
+    now = time.time()
+    history = load_history()
+    if any(h.get("task") == task_text and now - h.get("ts", 0) < DEFAULT_COOLDOWN
+           for h in history):
+        return False
+    queue.append({
+        "task": task_text,
+        "category": "research",
+        "priority": priority,
+        "source": source,
+    })
+    save_queue(queue)
+    return True
+
+
 def get_next_task() -> dict | None:
     """Получить следующую задачу (самый высокий приоритет)."""
     queue = build_queue()
