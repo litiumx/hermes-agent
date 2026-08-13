@@ -19,6 +19,7 @@ DB_PATH = Path(os.environ.get(
 TASK_TTL_HOURS = 48  # авто-удаление старых задач
 MAX_SESSIONS = 200   # retention: сколько последних сессий хранить
 SNAPSHOT_TTL_DAYS = 7  # retention: снапшоты старше — на удаление
+MEMORY_TIERS = ("short", "medium", "long")  # Saucedo Multi-Tier Memory
 
 
 def _ensure_db():
@@ -79,10 +80,25 @@ def _ensure_db():
                 op_counts_json TEXT NOT NULL
             )
         """)
+        # Saucedo Multi-Tier Memory: факты с тирами short/medium/long.
+        # Тир повышается consolidate_memory (возраст/частота) или promote_memory.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                value TEXT NOT NULL,
+                tier TEXT NOT NULL DEFAULT 'short',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access REAL NOT NULL DEFAULT 0
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_hash ON pending_tasks(task_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON pending_tasks(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ts ON sessions(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tier ON memory_items(tier)")
         conn.commit()
 
 
@@ -433,6 +449,173 @@ def get_stats() -> dict:
     }
 
 
+# --- Saucedo Multi-Tier Memory (short/medium/long) ---
+# Факты с тирами: short — рабочая память, medium — консолидируемая,
+# long — долгосрочная. Продвижение только вверх (consolidate/promote).
+
+def _tier_index(tier: str) -> int:
+    try:
+        return MEMORY_TIERS.index(tier)
+    except ValueError:
+        return -1
+
+
+def store_memory(key: str, value: str, tier: str = "short") -> bool:
+    """Сохранить факт в память. True если ключ НОВЫЙ.
+
+    tier: short/medium/long. Повторный store обновляет value и tier,
+    сохраняя access-историю. Невалидные входы → False без записи.
+    """
+    if not isinstance(key, str) or not key.strip():
+        return False
+    if not isinstance(value, str):
+        return False
+    if _tier_index(tier) < 0:
+        return False
+    _ensure_db()
+    key = key.strip()
+    now = time.time()
+    with _get_conn() as conn:
+        exists = conn.execute(
+            "SELECT id FROM memory_items WHERE key = ?", (key,)
+        ).fetchone()
+        new = exists is None
+        if new:
+            conn.execute(
+                "INSERT INTO memory_items (key, value, tier, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (key, value, tier, now, now),
+            )
+        else:
+            conn.execute(
+                "UPDATE memory_items SET value = ?, tier = ?, updated_at = ?"
+                " WHERE key = ?",
+                (value, tier, now, key),
+            )
+        conn.commit()
+    if new:
+        append_audit("memory_store", {"key": key[:80], "tier": tier})
+    return new
+
+
+def get_memory(key: str) -> dict | None:
+    """Прочитать факт: инкремент access_count, обновление last_access.
+
+    None — ключ не найден или невалиден.
+    """
+    if not isinstance(key, str) or not key.strip():
+        return None
+    _ensure_db()
+    now = time.time()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE memory_items SET access_count = access_count + 1,"
+            " last_access = ? WHERE key = ?",
+            (now, key.strip()),
+        )
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT key, value, tier, created_at, updated_at,"
+            " access_count, last_access FROM memory_items WHERE key = ?",
+            (key.strip(),),
+        ).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def promote_memory(key: str, to_tier: str) -> bool:
+    """Повысить тир факта. Только вверх: short→medium→long.
+
+    False: ключ не найден, невалидный tier, либо тир не выше текущего.
+    """
+    if not isinstance(key, str) or not key.strip():
+        return False
+    target = _tier_index(to_tier)
+    if target < 0:
+        return False
+    _ensure_db()
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT tier FROM memory_items WHERE key = ?", (key.strip(),)
+        ).fetchone()
+        if not row or _tier_index(row["tier"]) >= target:
+            return False
+        conn.execute(
+            "UPDATE memory_items SET tier = ?, updated_at = ? WHERE key = ?",
+            (to_tier, time.time(), key.strip()),
+        )
+        conn.commit()
+    append_audit("memory_promote", {"key": key.strip()[:80], "to_tier": to_tier})
+    return True
+
+
+def consolidate_memory(short_ttl_hours: int = 24,
+                       promote_accesses: int = 3,
+                       medium_ttl_days: int = 7,
+                       long_accesses: int = 10) -> dict:
+    """Консолидация тиров (Saucedo).
+
+    - short→medium: updated_at старше short_ttl_hours ИЛИ access_count >= promote_accesses
+    - medium→long:  updated_at старше medium_ttl_days ИЛИ access_count >= long_accesses
+
+    Возвращает {'short_to_medium': n, 'medium_to_long': n}.
+    """
+    _ensure_db()
+    now = time.time()
+    short_cutoff = now - short_ttl_hours * 3600
+    med_cutoff = now - medium_ttl_days * 86400
+    with _get_conn() as conn:
+        s2m = conn.execute(
+            "UPDATE memory_items SET tier = 'medium', updated_at = ?"
+            " WHERE tier = 'short' AND (updated_at < ? OR access_count >= ?)",
+            (now, short_cutoff, promote_accesses),
+        ).rowcount
+        m2l = conn.execute(
+            "UPDATE memory_items SET tier = 'long', updated_at = ?"
+            " WHERE tier = 'medium' AND (updated_at < ? OR access_count >= ?)",
+            (now, med_cutoff, long_accesses),
+        ).rowcount
+        conn.commit()
+    if s2m or m2l:
+        append_audit("memory_consolidate",
+                     {"short_to_medium": s2m, "medium_to_long": m2l})
+    return {"short_to_medium": s2m, "medium_to_long": m2l}
+
+
+def memory_stats() -> dict:
+    """Счётчики по тирам: {'short': n, 'medium': n, 'long': n}."""
+    _ensure_db()
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT tier, COUNT(*) as c FROM memory_items GROUP BY tier"
+        ).fetchall()
+    counts = {t: 0 for t in MEMORY_TIERS}
+    for r in rows:
+        counts[r["tier"]] = r["c"]
+    return counts
+
+
+def list_memory(tier: str = None) -> list[dict]:
+    """Список фактов (свежие первыми). tier=None — все; невалидный tier → []."""
+    _ensure_db()
+    if tier is not None and _tier_index(tier) < 0:
+        return []
+    with _get_conn() as conn:
+        if tier is None:
+            rows = conn.execute(
+                "SELECT key, value, tier, updated_at, access_count"
+                " FROM memory_items ORDER BY updated_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT key, value, tier, updated_at, access_count"
+                " FROM memory_items WHERE tier = ? ORDER BY updated_at DESC",
+                (tier,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def vacuum():
     """Оптимизировать БД."""
     _ensure_db()
@@ -452,6 +635,8 @@ def get_report() -> str:
     lines.append(f"  📸 Снапшотов: {stats['snapshots']}")
     lines.append(f"  💾 Размер БД: {stats['db_size_kb']} KB")
     lines.append(f"  ⏰ TTL задач: {stats['task_ttl_hours']}ч")
+    mem = memory_stats()
+    lines.append(f"  🧠 Память: short {mem['short']} / medium {mem['medium']} / long {mem['long']}")
 
     if ctx:
         lines.append(f"\n  🧠 Последняя сессия:")
@@ -529,6 +714,41 @@ if __name__ == "__main__":
                   f"log={r['log_events']} summary={r['summary_events']}")
             for i in r["issues"]:
                 print(f"  ISSUE: {i}")
+        elif cmd == "mem-store":
+            if len(sys.argv) < 4:
+                print("usage: mem-store <key> <value> [tier]")
+            else:
+                tier = sys.argv[4] if len(sys.argv) > 4 else "short"
+                ok = store_memory(sys.argv[2], sys.argv[3], tier)
+                print(f"{'stored' if ok else 'updated'}: {sys.argv[2]} ({tier})")
+        elif cmd == "mem-get":
+            if len(sys.argv) > 2:
+                m = get_memory(sys.argv[2])
+                if m:
+                    print(f"{m['key']}: {m['value']} [{m['tier']}] "
+                          f"access={m['access_count']}")
+                else:
+                    print("not found")
+            else:
+                print("usage: mem-get <key>")
+        elif cmd == "mem-promote":
+            if len(sys.argv) < 4:
+                print("usage: mem-promote <key> <tier>")
+            else:
+                ok = promote_memory(sys.argv[2], sys.argv[3])
+                print(f"{'promoted' if ok else 'not promoted'}: "
+                      f"{sys.argv[2]} → {sys.argv[3]}")
+        elif cmd == "mem-consolidate":
+            res = consolidate_memory()
+            print(f"consolidated: short→medium={res['short_to_medium']}, "
+                  f"medium→long={res['medium_to_long']}")
+        elif cmd == "mem-list":
+            tier = sys.argv[2] if len(sys.argv) > 2 else None
+            for m in list_memory(tier):
+                print(f"[{m['tier']}] {m['key']}: {m['value'][:50]} "
+                      f"access={m['access_count']}")
+        elif cmd == "mem-stats":
+            print(json.dumps(memory_stats(), indent=2))
         else:
             print(get_report())
     else:
