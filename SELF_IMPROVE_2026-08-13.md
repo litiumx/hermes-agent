@@ -101,3 +101,56 @@ tier в context_store». До сих пор БД хранила сессии/з�
 - session_bridge: проверить, что cooccurrence-decay читается потребителями
   (self_directed_queue) без пересчёта
 - memory_items: ретеншн long-тира (кап размера, decay невостребованных long)
+
+---
+
+## AGI Coding Cycle 23 (крон 13.08, репо hermes-agent)
+
+### Цель
+Grow point 22: «knowledge_gap topic: исключать темы, исследованные < N часов
+назад (сейчас выбирается просто самая старая находка)». Проблема: directed
+re-research ЗАМЕНЯЕТ находку темы, но при дублях старая остаётся и побеждала
+как «самая старая» — планировщик ставил re-research темы, которую
+пере-исследовали 3 часа назад.
+
+### Сделано (коммит 3ab37b9, ветка master, push выполнен bbd03e4..3ab37b9)
+1. **RESEARCH_REPEAT_HOURS = 12** — окно «недавно исследованной» темы
+   (больше 6ч-триггера gap, иначе фильтр не срабатывал бы никогда:
+   last_search > 6ч ⇒ все находки ≥ 6ч).
+2. **`_pick_gap_topic(dated, now, repeat_hours=None)`** — последнее
+   исследование темы = MAX timestamp её находок (одна тема → один ts в норме,
+   дубли — максимум). Кандидаты: (now - newest) >= repeat_hours*3600. Среди
+   кандидатов — тема с самой старой находкой (мин по oldest, как в цикле 20).
+   Все свежие → None → generic-задача без темы (не долбим свежее).
+   repeat_hours <= 0 / не число → фильтр выключен (старое поведение, тесты).
+3. **load_state** — gap_topic через _pick_gap_topic (вместо min по timestamp).
+4. **agi_test_queue_gap_repeat.py** — 8 тестов: дубль-тема (старая находка 20ч
+   + re-research 3ч) → исключена, выбрана следующая; свежая единственная →
+   generic; граница 11ч/13ч; все свежие → generic; no-ts → generic (регрессия);
+   run_next пробрасывает выжившую тему; unit _pick_gap_topic (repeat=0/None/
+   negative → фильтр выключен, пусто → None, без дублей → старейшая); stale
+   блокирует gap (регрессия).
+5. **Контракт-апдейт 3 тестов** (находки 1ч/5ч → 13ч): agi_test_queue_gap_topic
+   (T5), agi_test_queue_improvements (T2), agi_test_directed_topic (T2a) —
+   раньше они полагались на выбор «свежей» темы, что противоречит фильтру.
+6. Регрессия: 30/30 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (danger 0 / exfil 0 / persist 0 / syntax 0, 252 добавленных строк,
+   review_diff на git diff HEAD + git add -N для untracked тест-файла).
+
+### Урок
+- «Самая старая находка» = МИНИМАЛЬНЫЙ epoch, а не «давно не трогали»:
+  min(ts) по epoch выбирает старейшую запись, и repeat-фильтр снимает только
+  темы с НОВЕЙ max-ts. В unit-тесте я дважды перепутал направление (assert
+  «fresh» вместо «old») — для таких проверок нужен различающий кейс
+  (дубль-тема), где фильтр реально меняет выбор, а не «свежая vs старая».
+- repeat_hours=None = DEFAULT (фильтр ВКЛЮЧЁН), а не «выключен»: None →
+  RESEARCH_REPEAT_HOURS, выключают только 0/отрицательное. В тесте T7
+  сгруппировал None с 0 — assertion упал по своей же ошибке.
+
+### Grow points (следующие циклы)
+- session_bridge: проверить, что cooccurrence-decay читается потребителями
+  (self_directed_queue) без пересчёта
+- memory_items: ретеншн long-тира (кап размера, decay невостребованных long)
+- stale_topics (RESEARCH_STALE_HOURS=24) и gap-выбор: сейчас stale-темы идут
+  через отдельный путь — унифицировать выбор «что ре-исследовать» через
+  _pick_gap_topic (единый источник правды по возрасту)
