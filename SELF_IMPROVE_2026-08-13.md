@@ -154,3 +154,58 @@ re-research ЗАМЕНЯЕТ находку темы, но при дублях �
 - stale_topics (RESEARCH_STALE_HOURS=24) и gap-выбор: сейчас stale-темы идут
   через отдельный путь — унифицировать выбор «что ре-исследовать» через
   _pick_gap_topic (единый источник правды по возрасту)
+
+---
+
+## AGI Coding Cycle 24 (крон 13.08, репо hermes-agent)
+
+### Цель
+Grow point 23: «memory_items: ретеншн long-тира (кап размера, decay
+невостребованных long)». Multi-Tier Memory (цикл 22) умел только расти:
+consolidate повышает short→medium→long, но long-тир не имел предела —
+факты копились вечно, включая никогда не читавшиеся.
+
+### Сделано (коммит 88361dd, ветка master, push выполнен d4b0a0a..88361dd)
+1. **retain_memory(max_long=200, long_ttl_days=30, min_long_accesses=5)** —
+   ретеншн long-тира, два механизма:
+   - stale-эвикция: long с (last_access=0 ИЛИ last_access < now - ttl) И
+     access_count < min_long_accesses → DELETE. Оба условия AND: старый,
+     но часто читаемый факт — ценный (не выкидываем).
+   - cap-эвикция: если long > max_long → удаляются самые старые по
+     last_access (затем id — детерминизм), пока не останется max_long.
+   Отключение по параметрам: ttl<=0 или min<=0 → stale выкл; max_long<=0 →
+   cap выкл (тесты без кросс-влияния). Оба DELETE одним проходом в одном
+   conn, audit "memory_retain" при ненулевых эвикциях, возврат счётчиков
+   {'evicted_stale', 'evicted_cap', 'long_left'}.
+2. **CLI mem-retain [max_long] [ttl] [min_accesses]** — вывод
+   "retained: stale=N, cap=N, long_left=N".
+3. **agi_test_context_store_retention.py** — 14 групп, 37 проверок: пустая
+   БД, свежий выживает, stale+слабый доступ → эвикция, stale+частый →
+   выживает (AND), never-accessed (last_access=0) → эвикция, недавний
+   доступ+низкий счётчик → выживает, cap удаляет самых старых (5→3),
+   cap disabled, stale disabled, min disabled, другие тиры не трогаются,
+   audit при эвикции/тишина при no-op, stale+cap вместе (3+2→3),
+   CLI через subprocess с отдельной БД.
+4. Регрессия: 31/31 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (danger 0 / exfil 0 / persist 0 / syntax 0, 321 добавленная строка,
+   review_diff на git diff HEAD + git add -N для untracked тест-файла,
+   AGI_REPO_DIR=/home/sandbox/hermes-agent).
+
+### Урок
+- Ревьюер в песочнице смотрит в /root/.hermes (REPO_DIR по умолчанию) —
+  в cron-песочнице репо лежит в /home/sandbox/hermes-agent, без
+  AGI_REPO_DIR он ревьюит пустоту (0 изменённых файлов). Всегда задавать
+  AGI_REPO_DIR + AGI_REVIEWS_DIR (writable /home/sandbox/data/reviews).
+- Семантика «протух и не читается» = AND (возраст И слабый доступ), не OR:
+  OR убивал бы ценные частые факты. Недоступ last_access=0 (никогда не
+  читали) — отдельное условие в SQL, чтобы попадать в stale.
+
+### Grow points (следующие циклы)
+- session_bridge: проверить, что cooccurrence-decay читается потребителями
+  (self_directed_queue) без пересчёта — НО grep показал: cooccurrences
+  живут в error_pattern_learner, очередь их не читает (grow point устарел —
+  вместо проверки: интеграция companion-предсказаний в планировщик)
+- stale_topics (RESEARCH_STALE_HOURS=24) и gap-выбор: унифицировать выбор
+  «что ре-исследовать» через _pick_gap_topic (единый источник правды)
+- retain_memory: вызывать в cron/ежедневном цикле (сейчас функция есть,
+  автовызова нет) + decay для medium-тира
