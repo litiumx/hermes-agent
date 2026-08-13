@@ -616,6 +616,55 @@ def list_memory(tier: str = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def retain_memory(max_long: int = 200, long_ttl_days: int = 30,
+                  min_long_accesses: int = 5) -> dict:
+    """Ретеншн long-тира: эвикция невостребованных фактов.
+
+    - stale: long с (last_access=0 ИЛИ last_access < now - long_ttl_days)
+      И access_count < min_long_accesses → удаляются. Оба условия (AND):
+      старый, но часто читаемый факт — ценный, остаётся.
+    - cap: если long осталось > max_long → удаляются самые старые по
+      last_access (затем по id — детерминизм), пока не останется max_long.
+
+    Отключение: long_ttl_days<=0 или min_long_accesses<=0 → stale-чистка
+    выключена; max_long<=0 → cap выключен.
+
+    Возвращает {'evicted_stale': n, 'evicted_cap': n, 'long_left': n}.
+    Audit 'memory_retain' при ненулевых эвикциях.
+    """
+    _ensure_db()
+    now = time.time()
+    evicted_stale = 0
+    evicted_cap = 0
+    with _get_conn() as conn:
+        if long_ttl_days > 0 and min_long_accesses > 0:
+            cutoff = now - long_ttl_days * 86400
+            evicted_stale = conn.execute(
+                "DELETE FROM memory_items WHERE tier = 'long'"
+                " AND (last_access = 0 OR last_access < ?)"
+                " AND access_count < ?",
+                (cutoff, min_long_accesses),
+            ).rowcount
+        if max_long > 0:
+            over = conn.execute(
+                "SELECT COUNT(*) as c FROM memory_items WHERE tier = 'long'"
+            ).fetchone()["c"] - max_long
+            if over > 0:
+                evicted_cap = conn.execute(
+                    "DELETE FROM memory_items WHERE id IN ("
+                    " SELECT id FROM memory_items WHERE tier = 'long'"
+                    " ORDER BY last_access ASC, id ASC LIMIT ?)",
+                    (over,),
+                ).rowcount
+        conn.commit()
+    long_left = memory_stats()["long"]
+    if evicted_stale or evicted_cap:
+        append_audit("memory_retain",
+                     {"evicted_stale": evicted_stale, "evicted_cap": evicted_cap})
+    return {"evicted_stale": evicted_stale, "evicted_cap": evicted_cap,
+            "long_left": long_left}
+
+
 def vacuum():
     """Оптимизировать БД."""
     _ensure_db()
@@ -749,6 +798,13 @@ if __name__ == "__main__":
                       f"access={m['access_count']}")
         elif cmd == "mem-stats":
             print(json.dumps(memory_stats(), indent=2))
+        elif cmd == "mem-retain":
+            max_long = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+            ttl = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+            min_acc = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+            res = retain_memory(max_long, ttl, min_acc)
+            print(f"retained: stale={res['evicted_stale']}, "
+                  f"cap={res['evicted_cap']}, long_left={res['long_left']}")
         else:
             print(get_report())
     else:
