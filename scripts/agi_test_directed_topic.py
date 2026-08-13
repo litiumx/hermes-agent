@@ -82,7 +82,7 @@ print("TEST 1 PASS: run_next передаёт directed-topic в agi_curious_agen
 # находка → directed re-research); пустая база → generic без topic ---
 clean()
 write(q.KNOWLEDGE_FILE, {
-    "findings": [{"topic": "fresh", "timestamp": time.time() - 1 * 3600, "sources": [{"url": "f"}]}],
+    "findings": [{"topic": "fresh", "timestamp": time.time() - 13 * 3600, "sources": [{"url": "f"}]}],
     "topics_searched": ["fresh"],
     "last_search": time.time() - 100 * 3600,  # давно → knowledge_gap
 })

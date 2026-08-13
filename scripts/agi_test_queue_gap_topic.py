@@ -128,7 +128,7 @@ clean()
 warm_defaults()
 now = time.time()
 write(q.KNOWLEDGE_FILE, {
-    "findings": [{"topic": "gap topic X", "timestamp": now - 5 * 3600,
+    "findings": [{"topic": "gap topic X", "timestamp": now - 13 * 3600,
                   "sources": [{"url": "g"}]}],
     "topics_searched": ["gap topic X"],
     "last_search": now - 100 * 3600,

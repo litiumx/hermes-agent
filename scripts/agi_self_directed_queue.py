@@ -67,6 +67,7 @@ MAX_QUEUE_SIZE = 20
 TASK_TIMEOUT = 120  # секунд на выполнение одной задачи
 DEFAULT_COOLDOWN = 6 * 3600  # дефолтные задачи не чаще 1 раза в 6ч
 RESEARCH_STALE_HOURS = 24  # находка старше N часов → directed re-research задача
+RESEARCH_REPEAT_HOURS = 12  # тема, исследованная < N часов назад, НЕ кандидат в knowledge_gap
 
 # Скрипты-исполнители — AGI_SCRIPTS_DIR переопределяет каталог (в песочнице
 # /root/.hermes/scripts недоступен; репо-каталог задаётся через env).
@@ -87,6 +88,37 @@ TASK_ACTIONS = [
 
 def _ensure_dirs():
     QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _pick_gap_topic(dated: list[dict], now: float,
+                    repeat_hours: float | None = None) -> str | None:
+    """Выбрать тему для knowledge_gap из находок с валидным timestamp.
+
+    Цикл 23: темы, исследованные < RESEARCH_REPEAT_HOURS назад, исключаются —
+    у них свежие findings (directed re-research ЗАМЕНЯЕТ находку, но при
+    дублях старая остаётся и раньше побеждала как «самая старая»). Последнее
+    исследование темы = max timestamp её находок. Среди кандидатов — тема с
+    самой старой находкой (как в цикле 20). Все темы свежие → None
+    (generic-задача, консервативно — не долбим свежее).
+    repeat_hours <= 0 / не число → фильтр выключен (старое поведение).
+    """
+    if repeat_hours is None:
+        repeat_hours = RESEARCH_REPEAT_HOURS
+    if not isinstance(repeat_hours, (int, float)) or repeat_hours <= 0:
+        repeat_hours = 0
+    newest: dict[str, float] = {}
+    oldest: dict[str, float] = {}
+    for f in dated:
+        topic = f["topic"]
+        ts = f["timestamp"]
+        if topic not in newest or ts > newest[topic]:
+            newest[topic] = ts
+        if topic not in oldest or ts < oldest[topic]:
+            oldest[topic] = ts
+    candidates = [t for t in newest if (now - newest[t]) >= repeat_hours * 3600]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda t: oldest[t])
 
 
 def load_state() -> dict:
@@ -156,10 +188,11 @@ def load_state() -> dict:
                         if isinstance(f, dict) and f.get("topic")
                         and isinstance(f.get("timestamp"), (int, float))
                     ]
-                    gap_topic = (
-                        min(dated, key=lambda f: f["timestamp"]).get("topic")
-                        if dated else None
-                    )
+                    # Цикл 23: темы, исследованные < RESEARCH_REPEAT_HOURS
+                    # назад, исключаются (свежие findings = недавний
+                    # re-research; старая находка темы ≠ старая тема).
+                    # Все свежие → None → generic-задача без темы.
+                    gap_topic = _pick_gap_topic(dated, now)
                     state["knowledge_gaps"].append({
                         "reason": f"Нет исследований {hours_since:.0f} часов",
                         "priority": min(int(hours_since * 5), 50),

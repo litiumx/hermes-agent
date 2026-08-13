@@ -59,7 +59,7 @@ print("TEST 1 PASS: directed stale-topic задачи, приоритет по �
 # --- Test 2: fresh findings → stale нет, knowledge_gap fallback несёт тему ---
 clean()
 write(q.KNOWLEDGE_FILE, {
-    "findings": [{"topic": "fresh", "timestamp": now - 1 * 3600, "sources": []}],
+    "findings": [{"topic": "fresh", "timestamp": now - 13 * 3600, "sources": []}],
     "last_search": now - 100 * 3600,  # давно не исследовали → gap
 })
 queue = q.build_queue()
