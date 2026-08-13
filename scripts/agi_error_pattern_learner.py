@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """agi_error_pattern_learner.py — автономный предсказатель ошибок.
 
+v7 (13.08.2026): DECAY пар со-встречаемостей (grow point 12.08: «пары
+co-occurrences тоже взвешивать по recency»). _learn_cooccurrences и
+_learn_module_pairs считают вес скана 0.5^(age/half_life) как в
+_decay_scores: вчерашняя пара весит 1.0, месячная — доли, устаревшие
+пары выпадают за порог min_pairs сами. decay=False — старое поведение
+(+1 за скан, сырые целые счётчики). co_score/сообщения companions
+показывают «вес» вместо «числа сканов».
+
 v6 (12.08.2026): временной DECAY паттернов (grow point 12.08: «старые
 streaks весят меньше свежих»). _decay_scores считает recency-взвешенный
 score присутствия: каждый скан истории даёт вес 0.5^(age/half_life) —
@@ -297,27 +305,59 @@ def _prune_stale_learned(data: dict, max_age_days: int = LEARNED_TTL_DAYS) -> in
     return before - len(data["learned_patterns"])
 
 
-def _learn_cooccurrences(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
+def _scan_weight(h: dict, now: float = None,
+                 half_life_days: float = STREAK_HALF_LIFE_DAYS) -> float:
+    """Recency-вес скана для пар со-встречаемостей (v7).
+
+    Тот же закон, что в _decay_scores: 0.5 ** (age / half_life) — свежий
+    скан ≈1.0, на half-life 0.5, дальше экспоненциально меньше. Сканы без
+    timestamp и с битым (будущим) timestamp трактуются как свежие
+    (консервативно: не занижать вес). Округление до 4 знаков держит
+    свежие сканы ровно 1.0 (целые счётчики не превращаются в 0.9999...).
+    """
+    if now is None:
+        now = time.time()
+    ts = h.get("timestamp")
+    if ts is None:
+        return 1.0
+    age = now - ts
+    if age <= 0:
+        return 1.0
+    return round(0.5 ** (age / (half_life_days * 86400)), 4)
+
+
+def _learn_cooccurrences(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS,
+                         decay: bool = True) -> dict:
     """Строит карту парных со-встречаемостей паттернов из истории сканов.
 
     Для каждой записи истории (скана) все присутствующие паттерны (count>0)
-    попарно инкрементятся в обе стороны — карта симметрична. Пары с
-    частотой < min_pairs отбрасываются: одна случайная встреча не паттерн.
-    Записи без "patterns" (legacy/повреждённые) пропускаются молча.
+    попарно инкрементятся в обе стороны — карта симметрична. v7: вес скана
+    зависит от свежести (decay=True, по умолчанию) — 0.5^(age/half_life)
+    как в _decay_scores: вчерашняя пара весит 1.0, месячная — доли.
+    decay=False сохраняет старое поведение (+1 за скан, сырые счётчики).
+    Пары с суммой весов < min_pairs отбрасываются: одна случайная встреча
+    не паттерн. Записи без "patterns" (legacy/повреждённые) пропускаются.
     """
+    now = time.time()
     pairs: dict = {}
     for h in data.get("history", []):
         pats = h.get("patterns") or {}
         names = [n for n, c in pats.items() if c > 0]
+        w = _scan_weight(h, now) if decay else 1
+        init = 0.0 if decay else 0
         for i in range(len(names)):
             a = names[i]
             for b in names[i + 1:]:
-                pairs.setdefault(a, {}).setdefault(b, 0)
-                pairs[a][b] += 1
-                pairs.setdefault(b, {}).setdefault(a, 0)
-                pairs[b][a] += 1
-    return {a: {b: c for b, c in bs.items() if c >= min_pairs}
-            for a, bs in pairs.items() if any(c >= min_pairs for c in bs.values())}
+                pairs.setdefault(a, {}).setdefault(b, init)
+                pairs[a][b] += w
+                pairs.setdefault(b, {}).setdefault(a, init)
+                pairs[b][a] += w
+    out: dict = {}
+    for a, bs in pairs.items():
+        filtered = {b: round(c, 2) for b, c in bs.items() if c >= min_pairs}
+        if filtered:
+            out[a] = filtered
+    return out
 
 
 def predict_companions(data: dict, current_matches: dict,
@@ -347,11 +387,12 @@ def predict_companions(data: dict, current_matches: dict,
         "pattern": b,
         "co_score": c,
         "message": (f"Паттерн '{b}' исторически появляется вместе с текущими "
-                    f"ошибками ({c} совместных сканов). Вероятен следующим."),
+                    f"ошибками (вес {c:g}). Вероятен следующим."),
     } for b, c in ranked]
 
 
-def _learn_module_pairs(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
+def _learn_module_pairs(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS,
+                        decay: bool = True) -> dict:
     """Пары со-встречаемостей паттернов ПО МОДУЛЯМ (лог-файлам).
 
     v5. Возвращает {source: {a: {b: count}}}: для каждой записи истории и
@@ -359,12 +400,17 @@ def _learn_module_pairs(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
     попарно инкрементятся в обе стороны. В отличие от _learn_cooccurrences
     (пары в скане вообще), пара привязана к модулю: (a,b) в gateway.log
     значит «a и b приходили вместе именно в gateway.log». Прогноз по парам
-    другого модуля исключён. Пары с частотой < min_pairs отбрасываются.
-    Записи без "sources" (legacy/повреждённые) пропускаются.
+    другого модуля исключён. v7: вес скана по свежести (decay=True,
+    по умолчанию), decay=False — сырые счётчики. Пары с суммой весов
+    < min_pairs отбрасываются. Записи без "sources" (legacy/повреждённые)
+    пропускаются.
     """
+    now = time.time()
     per_src: dict = {}
     for h in data.get("history", []):
         sources = h.get("sources") or {}
+        w = _scan_weight(h, now) if decay else 1
+        init = 0.0 if decay else 0
         for src, pats in sources.items():
             if not pats:
                 continue
@@ -373,15 +419,15 @@ def _learn_module_pairs(data: dict, min_pairs: int = COOCCUR_MIN_PAIRS) -> dict:
             for i in range(len(names)):
                 a = names[i]
                 for b in names[i + 1:]:
-                    pairs.setdefault(a, {}).setdefault(b, 0)
-                    pairs[a][b] += 1
-                    pairs.setdefault(b, {}).setdefault(a, 0)
-                    pairs[b][a] += 1
+                    pairs.setdefault(a, {}).setdefault(b, init)
+                    pairs[a][b] += w
+                    pairs.setdefault(b, {}).setdefault(a, init)
+                    pairs[b][a] += w
     # Отбрасываем пары < min_pairs; источник держим только если после
     # фильтра остались пары (иначе {src: {}} засорял бы карту)
     out: dict = {}
     for src, pairs in per_src.items():
-        filtered = {a: {b: c for b, c in bs.items() if c >= min_pairs}
+        filtered = {a: {b: round(c, 2) for b, c in bs.items() if c >= min_pairs}
                     for a, bs in pairs.items()
                     if any(c >= min_pairs for c in bs.values())}
         if filtered:
@@ -426,8 +472,7 @@ def predict_module_companions(data: dict, current_sources: dict,
         "source": src,
         "co_score": cnt,
         "message": (f"Паттерн '{b}' исторически появляется в одном модуле с "
-                    f"текущими ошибками ({cnt} совместных вхождений). "
-                    f"Ожидается в {src}."),
+                    f"текущими ошибками (вес {cnt:g}). Ожидается в {src}."),
     } for b, (src, cnt) in ranked]
 
 
