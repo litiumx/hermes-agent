@@ -8,7 +8,7 @@ Session Logger — логирует сессии в структурирован
 2. sessions.db — собственная БД скрипта (legacy)
 3. WAL JSONL (~/.hermes/sessions/*/wal.jsonl) — мёртвый формат, только fallback
 """
-import json, os, sqlite3, time
+import json, os, sqlite3, sys, time
 from pathlib import Path
 
 DB = os.path.expanduser("~/.hermes/sessions.db")
@@ -278,7 +278,6 @@ def import_from_wal(sessions_dir=None):
 
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 1:
         action = sys.argv[1]
         if action == "import":
