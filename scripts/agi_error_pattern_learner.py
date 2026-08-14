@@ -108,6 +108,11 @@ COOCCUR_MIN_PAIRS = 2   # пара паттернов считается зна�
 MAX_COMPANIONS = 3      # сколько парных паттернов предсказывать за раз
 STREAK_HALF_LIFE_DAYS = 14  # v6: вес присутствия в скане падает вдвое за N дней
 RISK_DECAY_FLOOR = 2.0      # v6: min decay_score для риска high (2 свежих скана)
+# v8: петля обратной связи companion (цикл 26) — после исполнения пре-емптивной
+# fix-задачи планировщик сообщает, подтвердился ли предсказанный паттерн.
+FEEDBACK_BOOST = 1.0      # подтверждённый companion: +1 к весу пар (anchor, pattern)
+FEEDBACK_PENALTY = 0.5    # опровергнутый: -0.5 к весу пар (floor 0, удаление < min_pairs)
+FEEDBACK_JOURNAL_MAX = 50 # кап журнала фидбеков в patterns.json
 
 try:
     PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +391,10 @@ def predict_companions(data: dict, current_matches: dict,
     return [{
         "pattern": b,
         "co_score": c,
+        # v8: anchors — активные паттерны, породившие прогноз. Без них
+        # обратная связь (feedback_companion) не знает, КАКИЕ пары усиливать/
+        # ослаблять после исполнения fix-задачи (цикл 26).
+        "anchors": sorted(a for a in present if (co.get(a) or {}).get(b)),
         "message": (f"Паттерн '{b}' исторически появляется вместе с текущими "
                     f"ошибками (вес {c:g}). Вероятен следующим."),
     } for b, c in ranked]
@@ -465,15 +474,149 @@ def predict_module_companions(data: dict, current_sources: dict,
                     continue
                 cur = best.get(b)
                 if cur is None or cnt > cur[1]:
-                    best[b] = (src, cnt)
+                    # v8: anchors — активный паттерн в том же модуле, давший
+                    # прогноз (для обратной связи feedback_companion, цикл 26)
+                    best[b] = (src, cnt, [a])
     ranked = sorted(best.items(), key=lambda kv: -kv[1][1])[:max_companions]
     return [{
         "pattern": b,
         "source": src,
         "co_score": cnt,
+        "anchors": anchors,
         "message": (f"Паттерн '{b}' исторически появляется в одном модуле с "
                     f"текущими ошибками (вес {cnt:g}). Ожидается в {src}."),
-    } for b, (src, cnt) in ranked]
+    } for b, (src, cnt, anchors) in ranked]
+
+
+def _find_companion_entry(data: dict, pattern: str,
+                          module: str | None = None) -> dict | None:
+    """Найти запись companion (module или global) по паттерну.
+
+    module задан → сначала module_companions (source == module), затем
+    global companions как fallback (module-запись могла потеряться при
+    пересборке, а anchors в global-версии всё равно валидны).
+    """
+    if module:
+        for e in data.get("module_companions") or []:
+            if (isinstance(e, dict) and e.get("pattern") == pattern
+                    and e.get("source") == module):
+                return e
+    for e in data.get("companions") or []:
+        if isinstance(e, dict) and e.get("pattern") == pattern:
+            return e
+    return None
+
+
+def _adjust_pair(pairs: dict, a: str, b: str, delta: float) -> bool:
+    """Скорректировать симметричную пару (a,b) на delta, floor 0.0."""
+    if a not in pairs or b not in pairs[a]:
+        return False
+    pairs[a][b] = round(max(0.0, pairs[a][b] + delta), 2)
+    pairs.setdefault(b, {})
+    pairs[b][a] = round(max(0.0, pairs[b].get(a, 0.0) + delta), 2)
+    return True
+
+
+def _prune_pairs(pairs: dict, min_pairs: float = COOCCUR_MIN_PAIRS) -> int:
+    """Удалить пары ниже min_pairs (как в _learn_cooccurrences); вернуть число удалённых.
+
+    Симметричные карты чистим в обе стороны: если у a больше нет пар —
+    ключ удаляется, иначе b мог бы висеть с пустым словарём.
+    """
+    removed = 0
+    for a in list(pairs.keys()):
+        kept = {b: c for b, c in pairs[a].items() if c >= min_pairs}
+        removed += len(pairs[a]) - len(kept)
+        if kept:
+            pairs[a] = kept
+        else:
+            del pairs[a]
+            removed += 1
+    return removed
+
+
+def feedback_companion(pattern: str, confirmed: bool,
+                       module: str | None = None,
+                       boost: float = FEEDBACK_BOOST,
+                       penalty: float = FEEDBACK_PENALTY) -> dict:
+    """Обратная связь по companion-предсказанию после исполнения fix-задачи.
+
+    Замыкает петлю прогнозирования (grow point цикла 25): планировщик
+    создал пре-емптивную задачу из предсказания learner'а — после
+    исполнения (mark_completed в self_directed_queue) сообщаем,
+    подтвердился ли паттерн.
+
+    confirmed=True  → пары (anchor, pattern) в cooccurrences усиливаются
+                      на boost (следующий прогноз даст больший co_score).
+    confirmed=False → пары ослабляются на penalty (floor 0.0); пары ниже
+                      COOCCUR_MIN_PAIRS удаляются — опровергнутый
+                      companion выпадает из прогноза автоматически.
+    module задаёт модульную карту (module_cooccurrences[module]) — global
+    cooccurrences не трогаются. Записи без anchors (legacy) — fallback:
+    корректируется co_score самой записи (переживёт до пересборки).
+    Журнал ведётся в data["feedback"] (кап FEEDBACK_JOURNAL_MAX);
+    неизвестный паттерн — no-op с error, без журнала.
+    """
+    delta = boost if confirmed else -penalty
+    report = {"pattern": pattern, "module": module, "confirmed": confirmed,
+              "delta": delta, "adjusted_pairs": 0}
+    if not pattern or not isinstance(pattern, str):
+        report["error"] = "empty pattern"
+        return report
+    data = _load_data()
+    adjusted = 0
+    entry = None
+
+    if module:
+        pairs = data.setdefault("module_cooccurrences", {}).get(module)
+        if pairs:
+            entry = _find_companion_entry(data, pattern, module)
+            for a in (entry or {}).get("anchors") or []:
+                if _adjust_pair(pairs, a, pattern, delta):
+                    adjusted += 1
+            if adjusted:
+                data["module_cooccurrences"][module] = pairs
+                _prune_pairs(pairs)
+    else:
+        pairs = data.setdefault("cooccurrences", {})
+        entry = _find_companion_entry(data, pattern)
+        for a in (entry or {}).get("anchors") or []:
+            if _adjust_pair(pairs, a, pattern, delta):
+                adjusted += 1
+        if adjusted:
+            _prune_pairs(pairs)
+
+    # legacy-запись без anchors: правим co_score самой записи (fallback)
+    if adjusted == 0 and entry is not None and "co_score" in entry:
+        entry["co_score"] = round(max(0.0, entry.get("co_score", 0.0) + delta), 2)
+        if entry["co_score"] <= 0.0:
+            data["companions"] = [
+                e for e in data.get("companions", [])
+                if not (isinstance(e, dict) and e.get("pattern") == pattern)]
+            if module:
+                data["module_companions"] = [
+                    e for e in data.get("module_companions", [])
+                    if not (isinstance(e, dict) and e.get("pattern") == pattern
+                            and e.get("source") == module)]
+        report["co_score_adjusted"] = True
+
+    report["adjusted_pairs"] = adjusted
+    if adjusted == 0 and entry is None:
+        report["error"] = "pattern not found"
+        return report
+
+    fb = data.setdefault("feedback", [])
+    fb.append({"ts": time.time(), "pattern": pattern, "module": module,
+               "confirmed": confirmed, "delta": delta, "adjusted_pairs": adjusted})
+    data["feedback"] = fb[-FEEDBACK_JOURNAL_MAX:]
+    try:
+        with open(PATTERNS_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        report["saved"] = True
+    except OSError as e:
+        report["saved"] = False
+        report["error"] = str(e)
+    return report
 
 
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:

@@ -36,6 +36,16 @@ try:
 except ImportError:
     pass
 
+# Петля обратной связи companion (цикл 26): mark_completed сообщает
+# learner'у, подтвердился ли предсказанный паттерн (усиление/ослабление
+# весов пар). Lazy-импорт — модуль не обязателен, тишина при отсутствии.
+_HAS_FEEDBACK = False
+try:
+    from agi_error_pattern_learner import feedback_companion as _feedback_companion
+    _HAS_FEEDBACK = True
+except ImportError:
+    pass
+
 
 def _load_bridge_context() -> dict:
     """Контекст сессии: SQLite-first через agi_session_bridge, JSON fallback."""
@@ -365,6 +375,11 @@ def build_queue() -> list[dict]:
             "category": "fix",
             "priority": comp.get("priority", 60),
             "source": "companion",
+            # v8 (цикл 26): pattern/module несутся в задаче — mark_completed
+            # использует их для обратной связи в learner (фидбек по паре
+            # без парсинга текста задачи).
+            "pattern": pattern,
+            "module": module,
         })
 
     # 4. Directed re-research: устаревшие темы из knowledge findings —
@@ -579,11 +594,33 @@ def get_next_task() -> dict | None:
     return queue[0] if queue else None
 
 
-def mark_completed(task_description: str):
-    """Отметить задачу как выполненную (удалить из очереди)."""
+def mark_completed(task_description: str, confirmed: bool = True) -> dict | None:
+    """Отметить задачу как выполненную (удалить из очереди).
+
+    Для companion-задач (source="companion") замыкает петлю предсказаний
+    (цикл 26): вызывает feedback_companion в error_pattern_learner —
+    confirmed=True (паттерн реально наблюдался/исправлен) усиливает пары
+    (anchor, pattern), False (предсказание не подтвердилось) ослабляет
+    и со временем убирает companion из прогноза. Возвращает отчёт
+    фидбека или None (не companion-задача / learner недоступен).
+    """
     queue = load_queue()
+    removed = [t for t in queue if t["task"] == task_description]
     queue = [t for t in queue if t["task"] != task_description]
     save_queue(queue)
+    report = None
+    for t in removed:
+        if t.get("source") == "companion" and _HAS_FEEDBACK:
+            pattern = t.get("pattern")
+            if pattern:
+                try:
+                    report = _feedback_companion(pattern, confirmed,
+                                                 module=t.get("module"))
+                except (OSError, ValueError, TypeError):
+                    # Фидбек не должен ломать завершение задачи: IO/JSON
+                    # ошибки learner'а — тихий отказ, очередь всё равно чистится.
+                    report = None
+    return report
 
 
 def get_report() -> str:
