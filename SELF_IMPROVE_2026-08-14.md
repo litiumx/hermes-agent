@@ -185,3 +185,63 @@ gap-выбор: унифицировать выбор "что ре-исслед�
   confirmed) + авто-фидбек из run_next при детекте паттерна в выводе
 - _pick_gap_topic и _pick_stale_topics: параметр порога для gap-пути
   (сейчас только repeat_hours; stale_hours фиксирован 24ч в RESEARCH_STALE_HOURS)
+
+---
+
+## AGI Coding Cycle 28 (крон 14.08, репо hermes-agent)
+
+### Цель
+Grow point цикла 27: «feedback: CLI-точка входа для feedback_companion
+(--feedback pattern confirmed) + авто-фидбек из run_next при детекте
+паттерна в выводе». feedback_companion существовал как функция, но:
+(1) оператор не мог подтвердить/опровергнуть предсказание руками — CLI
+learner'а знал только update/report; (2) run_next исполнял companion-задачу
+и молча удалял её из очереди БЕЗ обратной связи — learner не узнавал,
+сбылся ли прогноз, веса пар не корректировались.
+
+### Сделано (коммит e739d0a, ветка master, push выполнен e39e97d..e739d0a)
+1. **CLI feedback в agi_error_pattern_learner.py**: `feedback <pattern>
+   <confirmed> [--module M] [--boost B] [--penalty P]` — confirmed:
+   true/false/1/0/yes/no, JSON-отчёт в stdout, exit 0 при успехе, exit 1
+   при невалидных аргументах (пустой вызов, плохой confirmed, плохой
+   float, неизвестный флаг) или error из feedback_companion (паттерн не
+   найден). Путь для ручной корректировки прогноза из шелла/крона.
+2. **Авто-фидбек в run_next**: после исполнения companion-задачи
+   (source="companion" + pattern) паттерн ищется в ПОЛНОМ stdout+stderr
+   (не только output_tail — паттерн мог быть в начале вывода) → найден:
+   confirmed=True (предсказание сбылось), нет: confirmed=False
+   (опровергнуто) → feedback_companion(pattern, confirmed, module).
+   Результат: result["feedback"] + result["feedback_confirmed"].
+   Ошибки learner'а — тихий отказ (задача уже выполнена, очередь
+   чистится). Только для done/failed; timeout/error/skipped фидбек не
+   трогают (нет полного вывода). output_tail теперь из full_output
+   (stdout+stderr), а не stdout-or-stderr.
+3. **agi_test_feedback_cli.py** — 12 тестов: CLI true/false (веса
+   2.5→3.5/2.0), --module (module-карта, global не тронут), --boost 2.5
+   (2.5→5.0), невалидный confirmed → exit 1, без аргументов → exit 1,
+   неизвестный паттерн → exit 1 + error, run_next авто-фидбек
+   confirmed=True/False (веса в файле), module-фидбек (global не
+   меняется), не-companion задача → без feedback-ключа, timeout → без
+   фидбека.
+4. Регрессия: 35/35 тестовых файлов PASS. Dogfooding: verdict ✅ CLEAN
+   (danger 0 / exfil 0 / persist 0 / syntax 0, 326 добавлено / 1 удалено,
+   review_diff на git diff HEAD + git add -N для untracked тест-файла,
+   AGI_REPO_DIR=/home/sandbox/hermes-agent).
+
+### Урок
+- В тестах с penalty важно стартовать с веса, который ПЕРЕЖИВЁТ penalty:
+  2.5−0.5=2.0 ≥ min_pairs (COOCCUR_MIN_PAIRS=2) — пара выживает; старт
+  с 2.0 дал бы 1.5 < 2 и пара была бы удалена prune'ом, тест упал бы по
+  своей же ошибке, а не по коду.
+- Дедуп companions по max co_score в _load_companions: module-тест должен
+  убирать global companion (4.0 > module 3.5) — иначе в очередь попадёт
+  global-вариант и module-фидбек не сработает.
+
+### Grow points (следующие циклы)
+- retain_memory: вызывать в cron/ежедневном цикле (сейчас функция есть,
+  автовызова нет) + decay для medium-тира
+- _pick_gap_topic и _pick_stale_topics: параметр порога для gap-пути
+  (сейчас только repeat_hours; stale_hours фиксирован 24ч в
+  RESEARCH_STALE_HOURS)
+- run_next: авто-фидбек для risk-задач (паттерн в выводе подтверждает
+  риск → снижать streak/приоритет, а не только companion)
