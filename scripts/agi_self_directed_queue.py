@@ -102,6 +102,39 @@ def _ensure_dirs():
     QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _topic_research_times(findings) -> dict:
+    """Единый источник правды по возрасту темы (цикл 27, grow point 23-26).
+
+    Последнее исследование темы = max timestamp её находок, первое = min.
+    Дубли находок НЕ плодят дубли записей — одна тема = одна запись, и
+    re-research (новая находка) сдвигает «последнее исследование» вперёд,
+    даже если старая находка осталась в файле. Малформы (не-dict, пустой
+    topic, отсутствующий/не-числовой/<=0 timestamp) игнорируются: ts=0 —
+    эпоха, не реальное время исследования.
+    """
+    out: dict[str, dict] = {}
+    if not isinstance(findings, list):
+        return out
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        topic = f.get("topic")
+        ts = f.get("timestamp")
+        if not isinstance(topic, str) or not topic.strip():
+            continue
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            continue
+        cur = out.get(topic)
+        if cur is None:
+            out[topic] = {"last": ts, "oldest": ts}
+        else:
+            if ts > cur["last"]:
+                cur["last"] = ts
+            if ts < cur["oldest"]:
+                cur["oldest"] = ts
+    return out
+
+
 def _pick_gap_topic(dated: list[dict], now: float,
                     repeat_hours: float | None = None) -> str | None:
     """Выбрать тему для knowledge_gap из находок с валидным timestamp.
@@ -109,8 +142,9 @@ def _pick_gap_topic(dated: list[dict], now: float,
     Цикл 23: темы, исследованные < RESEARCH_REPEAT_HOURS назад, исключаются —
     у них свежие findings (directed re-research ЗАМЕНЯЕТ находку, но при
     дублях старая остаётся и раньше побеждала как «самая старая»). Последнее
-    исследование темы = max timestamp её находок. Среди кандидатов — тема с
-    самой старой находкой (как в цикле 20). Все темы свежие → None
+    исследование темы = max timestamp её находок (общее ядро
+    _topic_research_times с _pick_stale_topics — цикл 27). Среди кандидатов —
+    тема с самой старой находкой (как в цикле 20). Все темы свежие → None
     (generic-задача, консервативно — не долбим свежее).
     repeat_hours <= 0 / не число → фильтр выключен (старое поведение).
     """
@@ -118,19 +152,43 @@ def _pick_gap_topic(dated: list[dict], now: float,
         repeat_hours = RESEARCH_REPEAT_HOURS
     if not isinstance(repeat_hours, (int, float)) or repeat_hours <= 0:
         repeat_hours = 0
-    newest: dict[str, float] = {}
-    oldest: dict[str, float] = {}
-    for f in dated:
-        topic = f["topic"]
-        ts = f["timestamp"]
-        if topic not in newest or ts > newest[topic]:
-            newest[topic] = ts
-        if topic not in oldest or ts < oldest[topic]:
-            oldest[topic] = ts
-    candidates = [t for t in newest if (now - newest[t]) >= repeat_hours * 3600]
+    times = _topic_research_times(dated)
+    candidates = [t for t, v in times.items()
+                  if (now - v["last"]) >= repeat_hours * 3600]
     if not candidates:
         return None
-    return min(candidates, key=lambda t: oldest[t])
+    return min(candidates, key=lambda t: times[t]["oldest"])
+
+
+def _pick_stale_topics(findings, now: float,
+                       stale_hours: float | None = None,
+                       max_topics: int = 3) -> list[dict]:
+    """Directed re-research кандидаты: темы, исследованные > stale_hours назад.
+
+    Цикл 27 (grow point 23-26): единый источник правды по возрасту с
+    _pick_gap_topic — возраст темы = max timestamp её находок (последнее
+    исследование), а не каждой находки по отдельности. Раньше stale-путь
+    шёл построчно: дубли находок плодили дубли задач, и тема, ре-исследованная
+    2ч назад, всё равно попадала в stale, если старая находка осталась.
+    Теперь: одна тема = одна запись, ре-исследованная тема не stale.
+    Возврат: [{"topic", "age_hours"}], сортировка по возрасту (самые старые
+    первыми), cap max_topics. stale_hours <= 0 / не число → RESEARCH_STALE_HOURS
+    (безопасный дефолт: не «всё stale»). Граница: строго > stale_hours.
+    """
+    if not isinstance(stale_hours, (int, float)) or stale_hours <= 0:
+        stale_hours = RESEARCH_STALE_HOURS
+    try:
+        cap = max(0, int(max_topics))
+    except (TypeError, ValueError):
+        cap = 3
+    times = _topic_research_times(findings)
+    stale = [
+        {"topic": t, "age_hours": (now - v["last"]) / 3600}
+        for t, v in times.items()
+        if (now - v["last"]) > stale_hours * 3600
+    ]
+    stale.sort(key=lambda s: s["age_hours"], reverse=True)
+    return stale[:cap]
 
 
 def _companion_priority(co_score) -> int:
@@ -244,16 +302,13 @@ def load_state() -> dict:
         try:
             knowledge = json.loads(KNOWLEDGE_FILE.read_text())
             now = time.time()
-            # Directed re-research: находки старше RESEARCH_STALE_HOURS —
-            # из них планировщик делает конкретные задачи (а не один generic).
-            stale = []
-            for f in knowledge.get("findings", []):
-                topic = f.get("topic")
-                fts = f.get("timestamp", 0)
-                if topic and fts and (now - fts) > RESEARCH_STALE_HOURS * 3600:
-                    stale.append({"topic": topic, "age_hours": (now - fts) / 3600})
-            stale.sort(key=lambda s: s["age_hours"], reverse=True)
-            state["stale_topics"] = stale[:3]
+            # Directed re-research: темы, исследованные > RESEARCH_STALE_HOURS
+            # назад. Цикл 27: _pick_stale_topics — единый источник правды по
+            # возрасту с _pick_gap_topic (одна тема = одна запись, возраст по
+            # ПОСЛЕДНЕМУ исследованию): дубли находок больше не плодят дубли
+            # задач, свежий re-research спасает тему от stale.
+            state["stale_topics"] = _pick_stale_topics(
+                knowledge.get("findings", []), now)
             # Темы, которые давно не исследовались (fallback: generic задача).
             # Цикл 20: gap-задача несёт КОНКРЕТНУЮ тему — самую старую находку
             # (кандидат на re-research). Без валидного timestamp тему не
@@ -388,7 +443,10 @@ def build_queue() -> list[dict]:
     # timeout), не пере-запускаем раньше DEFAULT_COOLDOWN — иначе
     # упавший поиск ре-квеился каждый цикл и долбил одну тему.
     for st in state.get("stale_topics", []):
-        task_text = f"Run curious agent research cycle for topic: {st['topic']}"
+        topic = st.get("topic")
+        if not topic:
+            continue
+        task_text = f"Run curious agent research cycle for topic: {topic}"
         if task_text in recent_tasks:
             continue
         queue.append({
