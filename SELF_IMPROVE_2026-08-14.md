@@ -122,3 +122,66 @@ learner (подтвердился ли companion — усиление/ослаб
   автовызова нет) + decay для medium-тира
 - feedback: CLI-точка входа для feedback_companion (--feedback pattern
   confirmed) + авто-фидбек из run_next при детекте паттерна в выводе
+
+---
+
+# Цикл 27 — унификация stale/gap выбора re-research (grow point 23-26)
+
+## Цель цикла
+Grow point (в очереди с цикла 23): «stale_topics (RESEARCH_STALE_HOURS=24) и
+gap-выбор: унифицировать выбор "что ре-исследовать" через _pick_gap_topic
+(единый источник правды по возрасту)». Два параллельных пути решали один
+вопрос с разной семантикой: stale_topics строились ПОСТРОЧНО по findings
+(дубли находок темы плодили дубли задач; тема, ре-исследованная 2ч назад,
+всё равно считалась stale, если старая находка осталась), knowledge_gap шёл
+через _pick_gap_topic (max-ts темы + repeat-фильтр цикла 23).
+
+## Сделано (коммит cbf2bc3, ветка master, push выполнен ded532f..cbf2bc3)
+1. **_topic_research_times(findings)** — единый источник правды по возрасту:
+   last = max ts находок темы (последнее исследование), oldest = min.
+   Малформы игнорируются (не-dict, пустой topic, отсутствующий/не-числовой/
+   <=0 timestamp — ts=0 это эпоха, не время исследования). Не-список → {}.
+2. **_pick_gap_topic** — рефакторинг на общее ядро (поведение 1-в-1:
+   repeat-фильтр, старейшая среди кандидатов, None при всех свежих).
+3. **_pick_stale_topics(findings, now, stale_hours=None, max_topics=3)** —
+   directed re-research кандидаты: [{"topic", "age_hours"}] по last-research,
+   одна тема = ОДНА запись (dedup — ключевой фикс), свежий re-research
+   спасает тему, сортировка oldest-first, cap max_topics (3),
+   stale_hours<=0/не число → RESEARCH_STALE_HOURS (безопасный дефолт, не
+   «всё stale»), граница строго >.
+4. **load_state** — инлайн-цикл stale удалён, state["stale_topics"] =
+   _pick_stale_topics(...) (тот же try/except, малформы БД без краха).
+5. **build_queue** — defensive: stale-запись без topic пропускается.
+6. **agi_test_queue_stale_unified.py** — 13 групп: ядро (пусто/не-список/
+   одиночная/дубли/малформы ts<=0), _pick_stale_topics (dedup 3 дубля → 1
+   запись, возраст по ПОСЛЕДНЕМУ исследованию 80ч не 100ч, re-research 2ч
+   спасает, сортировка, cap, custom-порог, дефолт, граница 24ч/24ч+1с),
+   load_state (дубли → 1 запись, re-research 3ч исключает), build_queue
+   (1 задача на тему, приоритет по возрасту), регрессии (gap-блокировка,
+   _pick_gap_topic через ядро).
+7. Регрессия: 34/34 тестовых файлов PASS (по exit code). Dogfooding:
+   verdict ✅ CLEAN (danger 0 / exfil 0 / persist 0 / syntax 0, 321
+   добавлено / 24 удалено, review_diff на git diff HEAD + git add -N для
+   untracked тест-файла, AGI_REPO_DIR=/home/sandbox/hermes-agent).
+
+## Урок
+- Два пути с «почти одинаковой» семантикой возраста — это два бага: stale
+  по-строчно (дубли задач) и gap по max-ts (защита от re-research). Один
+  вопрос «когда тему исследовали последний раз» — один ответ:
+  _topic_research_times. Любой новый путь выбора по возрасту должен идти
+  через него.
+- Ошибки теста ≠ ошибки кода: оба падения в этом цикле были мои
+  (list.count ищет ТОЧНОЕ совпадение строки, не подстроку; дефолтный
+  max_topics=3 маскировал проверку порога stale_hours=0 — изолировать
+  параметры max_topics=10 при проверке порога).
+- ts=0 в findings — малфом, не «самая старая тема»: старое условие
+  `if topic and fts` отсекало 0 неявно, новое ядро делает это явно
+  (ts <= 0 → ignore) — единое правило для обоих путей.
+
+## Grow points (следующие циклы)
+- retain_memory: вызывать в cron/ежедневном цикле (сейчас функция есть,
+  автовызова нет) + decay для medium-тира
+- feedback: CLI-точка входа для feedback_companion (--feedback pattern
+  confirmed) + авто-фидбек из run_next при детекте паттерна в выводе
+- _pick_gap_topic и _pick_stale_topics: параметр порога для gap-пути
+  (сейчас только repeat_hours; stale_hours фиксирован 24ч в RESEARCH_STALE_HOURS)
