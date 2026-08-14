@@ -6,7 +6,7 @@
 
 Интеграция:
 - agi_session_bridge.py: pending_tasks
-- agi_error_pattern_learner.py: риски
+- agi_error_pattern_learner.py: риски + companion-предсказания (v4/v5)
 - agi_curious_agent.py: находки для исследования
 """
 
@@ -68,6 +68,8 @@ TASK_TIMEOUT = 120  # секунд на выполнение одной зада
 DEFAULT_COOLDOWN = 6 * 3600  # дефолтные задачи не чаще 1 раза в 6ч
 RESEARCH_STALE_HOURS = 24  # находка старше N часов → directed re-research задача
 RESEARCH_REPEAT_HOURS = 12  # тема, исследованная < N часов назад, НЕ кандидат в knowledge_gap
+COMPANION_MAX_TASKS = 3  # максимум companion-задач за одну сборку очереди
+COMPANION_PRIORITY_CAP = 90  # потолок приоритета companion (риски=100 выше)
 
 # Скрипты-исполнители — AGI_SCRIPTS_DIR переопределяет каталог (в песочнице
 # /root/.hermes/scripts недоступен; репо-каталог задаётся через env).
@@ -121,9 +123,70 @@ def _pick_gap_topic(dated: list[dict], now: float,
     return min(candidates, key=lambda t: oldest[t])
 
 
+def _companion_priority(co_score) -> int:
+    """Приоритет companion-задачи от co_score (0-10 → 50-90, кап 90).
+
+    Риски (100) всегда выше companion-предсказаний — подтверждённая
+    проблема важнее вероятной. Ниже порога 0.5 — базовая 50 (не нуль,
+    чтобы задача не терялась в сортировке).
+    """
+    try:
+        score = max(0.0, float(co_score))
+    except (TypeError, ValueError):
+        score = 0.0
+    prio = 50 + int(score * 8)
+    return min(prio, COMPANION_PRIORITY_CAP)
+
+
+def _load_companions(patterns: dict) -> list[dict]:
+    """Companion-предсказания из patterns.json (v4 global + v5 module).
+
+    Паттерны, исторически приходящие ВМЕСТЕ с текущими ошибками — очередь
+    делает из них пре-емптивные fix-задачи (grow point циклов 21-24:
+    learner персистил companions, планировщик их не читал). Дедуп по
+    pattern: выживает вариант с максимальным co_score (module 4.0 >
+    global 2.0). Malformed записи (не dict / нет pattern / пустой)
+    пропускаются молча.
+    """
+    out: dict[str, dict] = {}
+    for entry in patterns.get("companions") or []:
+        if not isinstance(entry, dict):
+            continue
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        cur = out.get(pattern)
+        score = entry.get("co_score", 0)
+        if cur is None or score > cur.get("co_score", 0):
+            out[pattern] = {
+                "pattern": pattern,
+                "co_score": score,
+                "module": None,
+                "priority": _companion_priority(score),
+            }
+    for entry in patterns.get("module_companions") or []:
+        if not isinstance(entry, dict):
+            continue
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        score = entry.get("co_score", 0)
+        cur = out.get(pattern)
+        if cur is None or score > cur.get("co_score", 0):
+            out[pattern] = {
+                "pattern": pattern,
+                "co_score": score,
+                "module": entry.get("source"),
+                "priority": _companion_priority(score),
+            }
+    ranked = sorted(out.values(), key=lambda c: -c.get("co_score", 0))
+    return ranked[:COMPANION_MAX_TASKS]
+
+
 def load_state() -> dict:
     """Собрать состояние из всех источников."""
-    state = {"pending": [], "risks": [], "knowledge_gaps": [], "errors_active": []}
+    state = {"pending": [], "risks": [], "knowledge_gaps": [], "errors_active": [],
+             "companions": []}
 
     # Задачи из bridge (SQLite-first)
     bridge = _load_bridge_context()
@@ -136,6 +199,11 @@ def load_state() -> dict:
     if PATTERNS_FILE.exists():
         try:
             patterns = json.loads(PATTERNS_FILE.read_text())
+            # Companion-предсказания (v4 global + v5 module): паттерны,
+            # исторически приходящие вместе с текущими ошибками — пре-емптивные
+            # fix-задачи (grow point циклов 21-24: learner персистил,
+            # планировщик не читал).
+            state["companions"] = _load_companions(patterns)
             risks = patterns.get("risks", [])
             if risks:
                 # Новая схема: только HIGH риски (falling→low уже отфильтрован
@@ -272,7 +340,34 @@ def build_queue() -> list[dict]:
             "source": "risk",
         })
 
-    # 3. Directed re-research: устаревшие темы из knowledge findings —
+    # 3. Companion-предсказания (grow point циклов 21-24): паттерны, которые
+    # learner считает вероятными «следующими» (исторически приходят вместе
+    # с активными ошибками). Пре-емптивные fix-задачи: приоритет от co_score
+    # (50-90), всегда НИЖЕ подтверждённых рисков (100). Паттерн, уже
+    # покрытый риск-задачей, пропускается (не дублируем). С кулдауном:
+    # недавно исполненная companion-задача не пере-добавляется.
+    risk_patterns = {r.get("pattern") for r in state.get("risks", []) if r.get("pattern")}
+    for comp in state.get("companions", []):
+        pattern = comp.get("pattern")
+        if not pattern or pattern in risk_patterns:
+            continue
+        module = comp.get("module")
+        if module:
+            task_text = (f"Investigate and fix pattern: {pattern} "
+                         f"(companion in {module})")
+        else:
+            task_text = (f"Investigate and fix pattern: {pattern} "
+                         f"(companion of active errors)")
+        if task_text in recent_tasks:
+            continue
+        queue.append({
+            "task": task_text,
+            "category": "fix",
+            "priority": comp.get("priority", 60),
+            "source": "companion",
+        })
+
+    # 4. Directed re-research: устаревшие темы из knowledge findings —
     # конкретная задача на тему (а не один generic "research cycle").
     # С кулдауном: если research по теме уже исполнялся (успех/фейл/
     # timeout), не пере-запускаем раньше DEFAULT_COOLDOWN — иначе
