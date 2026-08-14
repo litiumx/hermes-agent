@@ -847,5 +847,57 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "update":
         print(json.dumps(update_patterns(), indent=2, ensure_ascii=False))
+    elif len(sys.argv) > 1 and sys.argv[1] == "feedback":
+        # CLI обратной связи companion (цикл 28): подтвердить/опровергнуть
+        # предсказание руками. Usage:
+        #   feedback <pattern> <confirmed> [--module M] [--boost B] [--penalty P]
+        # confirmed: true/false/1/0/yes/no. Exit 0 — фидбек применён,
+        # exit 1 — невалидные аргументы или паттерн не найден.
+        argv = sys.argv[2:]
+        if len(argv) < 2:
+            print(json.dumps({"error": "usage: feedback <pattern> <confirmed> "
+                                       "[--module M] [--boost B] [--penalty P]"},
+                             ensure_ascii=False))
+            sys.exit(1)
+        pattern, confirmed_raw = argv[0], argv[1].strip().lower()
+        if confirmed_raw in ("true", "1", "yes", "y"):
+            confirmed = True
+        elif confirmed_raw in ("false", "0", "no", "n"):
+            confirmed = False
+        else:
+            print(json.dumps({"error": f"invalid confirmed: {argv[1]!r}"},
+                             ensure_ascii=False))
+            sys.exit(1)
+        module, boost, penalty = None, FEEDBACK_BOOST, FEEDBACK_PENALTY
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--module" and i + 1 < len(argv):
+                module = argv[i + 1]
+                i += 2
+            elif argv[i] == "--boost" and i + 1 < len(argv):
+                try:
+                    boost = float(argv[i + 1])
+                except ValueError:
+                    print(json.dumps({"error": f"invalid boost: {argv[i + 1]!r}"},
+                                     ensure_ascii=False))
+                    sys.exit(1)
+                i += 2
+            elif argv[i] == "--penalty" and i + 1 < len(argv):
+                try:
+                    penalty = float(argv[i + 1])
+                except ValueError:
+                    print(json.dumps({"error": f"invalid penalty: {argv[i + 1]!r}"},
+                                     ensure_ascii=False))
+                    sys.exit(1)
+                i += 2
+            else:
+                print(json.dumps({"error": f"unknown argument: {argv[i]!r}"},
+                                 ensure_ascii=False))
+                sys.exit(1)
+        report = feedback_companion(pattern, confirmed, module=module,
+                                    boost=boost, penalty=penalty)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        if report.get("error"):
+            sys.exit(1)
     else:
         print(get_report())

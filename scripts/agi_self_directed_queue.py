@@ -582,12 +582,31 @@ def run_next() -> dict | None:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=TASK_TIMEOUT
             )
+            full_output = (proc.stdout or "") + "\n" + (proc.stderr or "")
             result = {
                 "task": task_text,
                 "status": "done" if proc.returncode == 0 else "failed",
                 "exit_code": proc.returncode,
-                "output_tail": (proc.stdout or proc.stderr).strip()[-300:],
+                "output_tail": full_output.strip()[-300:],
             }
+            # Авто-фидбек companion (цикл 28): паттерн ЕСТЬ в выводе →
+            # confirmed=True (предсказание сбылось), нет → confirmed=False
+            # (опровергнуто). Детект по ПОЛНОМУ stdout+stderr (не только
+            # tail): паттерн мог появиться в начале вывода. Только для
+            # задач source="companion" с паттерном; не-companion задачи
+            # фидбек не трогают. Ошибки learner'а — тихий отказ, задача
+            # уже выполнена, очередь чистится ниже.
+            if (task_item.get("source") == "companion" and _HAS_FEEDBACK
+                    and task_item.get("pattern")):
+                confirmed = task_item["pattern"].lower() in full_output.lower()
+                try:
+                    fb = _feedback_companion(
+                        task_item["pattern"], confirmed,
+                        module=task_item.get("module"))
+                    result["feedback"] = fb
+                    result["feedback_confirmed"] = confirmed
+                except (OSError, ValueError, TypeError):
+                    pass
         except subprocess.TimeoutExpired:
             result = {"task": task_text, "status": "timeout", "exit_code": -1}
         except Exception as exc:  # noqa: BLE001
