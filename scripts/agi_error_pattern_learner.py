@@ -113,6 +113,7 @@ RISK_DECAY_FLOOR = 2.0      # v6: min decay_score для риска high (2 св
 FEEDBACK_BOOST = 1.0      # подтверждённый companion: +1 к весу пар (anchor, pattern)
 FEEDBACK_PENALTY = 0.5    # опровергнутый: -0.5 к весу пар (floor 0, удаление < min_pairs)
 FEEDBACK_JOURNAL_MAX = 50 # кап журнала фидбеков в patterns.json
+RISK_FEEDBACK_PENALTY = 2 # опровергнутый риск: -2 к streak (порог high = 3)
 
 try:
     PATTERNS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -619,6 +620,56 @@ def feedback_companion(pattern: str, confirmed: bool,
     return report
 
 
+def feedback_risk(pattern: str, confirmed: bool,
+                  penalty: float = RISK_FEEDBACK_PENALTY) -> dict:
+    """Обратная связь по risk-задаче после исполнения run_next (цикл 30).
+
+    Замыкает петлю прогнозирования рисков: планировщик создал fix-задачу
+    из predict_risks (streak >= 3, тренд не falling) — после исполнения
+    («Investigate and fix pattern: ...») сообщаем, проявился ли паттерн
+    в выводе расследования.
+
+    confirmed=True  → риск подтверждён (паттерн реально наблюдается):
+                      streak НЕ трогаем — счётчик обновляет сам сканер
+                      (update_patterns), ручное усиление дралось бы с ним.
+    confirmed=False → паттерн не проявился → streak снижается на penalty
+                      (floor 0). Одно опровержение сбрасывает streak 3→1 —
+                      риск падает ниже порога high и перестаёт
+                      генерировать задачи (не «вечный» ре-квеинг).
+    Журнал ведётся в data["feedback"] (type="risk", кап FEEDBACK_JOURNAL_MAX);
+    неизвестный паттерн — no-op с error, без журнала.
+    """
+    delta = 0.0 if confirmed else -penalty
+    report = {"pattern": pattern, "confirmed": confirmed, "delta": delta}
+    if not pattern or not isinstance(pattern, str):
+        report["error"] = "empty pattern"
+        return report
+    data = _load_data()
+    streaks = data.get("streaks", {})
+    if pattern not in streaks:
+        report["error"] = "pattern not found"
+        return report
+    before = streaks.get(pattern, 0)
+    if not confirmed:
+        streaks[pattern] = max(0, before - penalty)
+    data["streaks"] = streaks
+    report["streak_before"] = before
+    report["streak_after"] = streaks[pattern]
+    fb = data.setdefault("feedback", [])
+    fb.append({"ts": time.time(), "type": "risk", "pattern": pattern,
+               "confirmed": confirmed, "delta": delta,
+               "streak_before": before, "streak_after": streaks[pattern]})
+    data["feedback"] = fb[-FEEDBACK_JOURNAL_MAX:]
+    try:
+        with open(PATTERNS_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        report["saved"] = True
+    except OSError as e:
+        report["saved"] = False
+        report["error"] = str(e)
+    return report
+
+
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
     """Тренд появления паттерна по последним сканам: rising / stable / falling / new.
 
@@ -896,6 +947,46 @@ if __name__ == "__main__":
                 sys.exit(1)
         report = feedback_companion(pattern, confirmed, module=module,
                                     boost=boost, penalty=penalty)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        if report.get("error"):
+            sys.exit(1)
+    elif len(sys.argv) > 1 and sys.argv[1] == "feedback-risk":
+        # CLI обратной связи рисков (цикл 30): подтвердить/опровергнуть
+        # риск руками. Usage:
+        #   feedback-risk <pattern> <confirmed> [--penalty N]
+        # confirmed: true/false/1/0/yes/no. Exit 0 — фидбек применён,
+        # exit 1 — невалидные аргументы или паттерн не найден.
+        argv = sys.argv[2:]
+        if len(argv) < 2:
+            print(json.dumps({"error": "usage: feedback-risk <pattern> "
+                                       "<confirmed> [--penalty N]"},
+                             ensure_ascii=False))
+            sys.exit(1)
+        pattern, confirmed_raw = argv[0], argv[1].strip().lower()
+        if confirmed_raw in ("true", "1", "yes", "y"):
+            confirmed = True
+        elif confirmed_raw in ("false", "0", "no", "n"):
+            confirmed = False
+        else:
+            print(json.dumps({"error": f"invalid confirmed: {argv[1]!r}"},
+                             ensure_ascii=False))
+            sys.exit(1)
+        penalty = RISK_FEEDBACK_PENALTY
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--penalty" and i + 1 < len(argv):
+                try:
+                    penalty = float(argv[i + 1])
+                except ValueError:
+                    print(json.dumps({"error": f"invalid penalty: {argv[i + 1]!r}"},
+                                     ensure_ascii=False))
+                    sys.exit(1)
+                i += 2
+            else:
+                print(json.dumps({"error": f"unknown argument: {argv[i]!r}"},
+                                 ensure_ascii=False))
+                sys.exit(1)
+        report = feedback_risk(pattern, confirmed, penalty=penalty)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         if report.get("error"):
             sys.exit(1)

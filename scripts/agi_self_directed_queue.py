@@ -38,10 +38,13 @@ except ImportError:
 
 # Петля обратной связи companion (цикл 26): mark_completed сообщает
 # learner'у, подтвердился ли предсказанный паттерн (усиление/ослабление
-# весов пар). Lazy-импорт — модуль не обязателен, тишина при отсутствии.
+# весов пар). Risk-фидбек (цикл 30): run_next сообщает, проявился ли
+# паттерн риска в выводе расследования (снижение streak при опровержении).
+# Lazy-импорт — модуль не обязателен, тишина при отсутствии.
 _HAS_FEEDBACK = False
 try:
     from agi_error_pattern_learner import feedback_companion as _feedback_companion
+    from agi_error_pattern_learner import feedback_risk as _feedback_risk
     _HAS_FEEDBACK = True
 except ImportError:
     pass
@@ -403,6 +406,10 @@ def build_queue() -> list[dict]:
             "category": "fix",
             "priority": risk.get("priority", 80),
             "source": "risk",
+            # Цикл 30: pattern несётся в задаче (как у companion, цикл 26) —
+            # run_next использует его для авто-фидбека в learner без
+            # парсинга текста задачи.
+            "pattern": risk["pattern"],
         })
 
     # 3. Companion-предсказания (grow point циклов 21-24): паттерны, которые
@@ -605,6 +612,21 @@ def run_next() -> dict | None:
                         module=task_item.get("module"))
                     result["feedback"] = fb
                     result["feedback_confirmed"] = confirmed
+                except (OSError, ValueError, TypeError):
+                    pass
+            # Авто-фидбек risk (цикл 30): паттерн риска ЕСТЬ в выводе →
+            # confirmed=True (риск реален, streak не трогаем), нет →
+            # confirmed=False (опровергнут, streak снижается → задача
+            # перестаёт ре-генерироваться из predict_risks). Только для
+            # задач source="risk" с паттерном; ошибки learner'а — тихий
+            # отказ, задача уже выполнена.
+            if (task_item.get("source") == "risk" and _HAS_FEEDBACK
+                    and task_item.get("pattern")):
+                confirmed = task_item["pattern"].lower() in full_output.lower()
+                try:
+                    fb = _feedback_risk(task_item["pattern"], confirmed)
+                    result["risk_feedback"] = fb
+                    result["risk_confirmed"] = confirmed
                 except (OSError, ValueError, TypeError):
                     pass
         except subprocess.TimeoutExpired:
