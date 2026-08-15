@@ -24,6 +24,8 @@ HISTORY_DIR = SESSION_DIR / "history"
 MAX_ARCHIVE = 10
 MAX_CONTEXT_SIZE_KB = 64
 _MAX_STRING_LEN = 2000  # обрезка длинных строк в снапшотах (traceback'и и т.п.)
+_TASK_CREATED_KEY = "_task_created"  # sidecar: task -> unix ts (JSON-бэкенд)
+JSON_TASK_TTL_HOURS = 48            # паритет с agi_context_store.TASK_TTL_HOURS
 
 # --- SQLite backend (primary) ---
 import importlib
@@ -87,7 +89,7 @@ def save_context(context: dict, snapshot: bool = True) -> str:
     return _format_diff(diff) if diff else "no changes (JSON)"
 
 
-_DIFF_IGNORE = {"timestamp"}  # регенерируется при каждом сохранении — не информативен в диффе
+_DIFF_IGNORE = {"timestamp", "_task_created"}  # регенерируется при каждом сохранении — не информативен в диффе
 
 
 def load_context() -> dict:
@@ -124,6 +126,14 @@ def _canonicalize(context: dict) -> dict:
     - last_known_good (int) → last_known_good_state (bool)
     - id — служебный, в дифф не попадает
     """
+    # Sidecar: timestamps задач JSON-бэкенда (SQLite хранит created_at в БД).
+    # Пруним ключи без живой задачи — удалённые не оставляют хвостов.
+    _live = {t.strip().lower() for t in context.get("pending_tasks", [])
+             if isinstance(t, str)}
+    _created = context.get(_TASK_CREATED_KEY, {})
+    if isinstance(_created, dict):
+        _created = {k: v for k, v in _created.items()
+                    if k.strip().lower() in _live}
     return {
         "timestamp": context.get("timestamp", 0),
         "last_task": context.get("last_task", ""),
@@ -138,6 +148,7 @@ def _canonicalize(context: dict) -> dict:
         "modified_files": context.get("modified_files", []),
         "session_phase": context.get("session_phase", "unknown"),
         "tool_call_count": context.get("tool_call_count", 0),
+        _TASK_CREATED_KEY: _created,
     }
 
 
@@ -175,7 +186,8 @@ def add_task_json(task: str) -> bool:
     """Добавить pending task в JSON-бэкенд с дедупом (как SQLite-путь).
 
     Возвращает True если добавлено, False если такой task уже есть
-    (case-insensitive, с учётом пробелов по краям).
+    (case-insensitive, с учётом пробелов по краям). Записывает timestamp
+    в sidecar _task_created — иначе age-out в JSON-режиме невозможен.
     """
     ctx = load_context()
     tasks = ctx.setdefault("pending_tasks", [])
@@ -183,8 +195,50 @@ def add_task_json(task: str) -> bool:
     if any(t.strip().lower() == norm for t in tasks):
         return False
     tasks.append(task.strip())
+    created = ctx.setdefault(_TASK_CREATED_KEY, {})
+    created[task.strip()] = time.time()
     save_context(ctx, snapshot=False)
     return True
+
+
+def age_out_tasks_json(max_age_hours: float = JSON_TASK_TTL_HOURS) -> int:
+    """Удалить задачи JSON-бэкенда старше TTL (паритет с SQLite age_out_tasks).
+
+    Задачи БЕЗ timestamp в sidecar (legacy-данные) НЕ удаляются — возраст
+    неизвестен, терять их нельзя. Возвращает количество удалённых.
+    """
+    ctx = load_context()
+    tasks = ctx.get("pending_tasks", [])
+    if not tasks:
+        return 0
+    created = ctx.get(_TASK_CREATED_KEY, {})
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    keep = []
+    for t in tasks:
+        ts = created.get(t)
+        if ts is not None and isinstance(ts, (int, float)) and ts < cutoff:
+            removed += 1
+        else:
+            keep.append(t)
+    if removed:
+        ctx["pending_tasks"] = keep
+        save_context(ctx, snapshot=False)
+    return removed
+
+
+def get_stats_json() -> dict:
+    """Статистика JSON-бэкенда (паритет с agi_context_store.get_stats)."""
+    ctx = load_context()
+    snapshots = sorted(HISTORY_DIR.glob("snapshot_*.json")) if HISTORY_DIR.exists() else []
+    size_kb = BRIDGE_FILE.stat().st_size // 1024 if BRIDGE_FILE.exists() else 0
+    return {
+        "backend": "JSON",
+        "active_tasks": len(ctx.get("pending_tasks", [])),
+        "snapshots": len(snapshots),
+        "bridge_size_kb": size_kb,
+        "task_ttl_hours": JSON_TASK_TTL_HOURS,
+    }
 
 
 def _archive_snapshot(ctx: dict):
@@ -328,11 +382,13 @@ if __name__ == "__main__":
                 else:
                     print(f"Not found: {task}")
     elif len(sys.argv) > 1 and sys.argv[1] == "age-out":
+        hours = float(sys.argv[2]) if len(sys.argv) > 2 else JSON_TASK_TTL_HOURS
         if _USE_SQLITE:
             n = _store_call("age_out_tasks")
             print(f"Aged out {n} tasks (SQLite)")
         else:
-            print("age-out requires SQLite backend")
+            n = age_out_tasks_json(max_age_hours=hours)
+            print(f"Aged out {n} tasks (JSON)")
     elif len(sys.argv) > 1 and sys.argv[1] == "history":
         hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
         if _USE_SQLITE:
@@ -353,7 +409,8 @@ if __name__ == "__main__":
             stats = _store_call("get_stats")
             print(f"Backend: SQLite | Sessions: {stats['total_sessions']} | Tasks: {stats['active_tasks']} | DB: {stats['db_size_kb']}KB")
         else:
-            print("Backend: JSON | stats unavailable (use 'summary')")
+            stats = get_stats_json()
+            print(f"Backend: JSON | Tasks: {stats['active_tasks']} | Snapshots: {stats['snapshots']} | Bridge: {stats['bridge_size_kb']}KB")
     elif len(sys.argv) > 1 and sys.argv[1] == "backend":
         print(f"Current backend: {'SQLite' if _USE_SQLITE else 'JSON (fallback)'}")
     else:
