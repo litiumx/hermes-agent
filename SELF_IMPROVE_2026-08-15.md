@@ -132,3 +132,42 @@ streak на 3+ → задача ре-генерировалась каждый �
   стабилизации medium-decay
 - risk-фидбек: подтверждённый риск мог бы сбрасывать кулдаун задачи
   (сейчас DEFAULT_COOLDOWN=6ч ждёт даже при подтверждении)
+
+---
+
+# SELF_IMPROVE — 2026-08-15 (AGI Coding Cycle 31)
+
+## Цель цикла
+Grow point 15.08 #3 (arXiv 2608.11436): honeytokens в shared memory —
+защита от несанкционированного ЧТЕНИЯ/выноса памяти. Verified Memory CAS
+защищает запись, но не отвечает «читали ли память». Урок MemGhost
+(ложная память через email) показал: вектор «внешний контент → память»
+реален; хонейтокены закрывают обратный «память → внешний контент».
+
+## Сделано (коммит 55599a6, ветка master)
+1. **agi_honeytoken.py** — приманки-хонейтокены: маркер AGI_HONEY_<8hex>
+   в правдоподобном фейковом секрете (note), который легитимный агент
+   никогда не использует. plant(n) / check_exfil(text|file) /
+   verify() / status() + CLI plant|check|verify|status (exit 1 = утечка).
+2. **Детект удаления**: planted_total-счётчик — verify() находит
+   удаление записи без следа (removed) и битые записи (missing).
+   Legacy-сторы без поля получают planted_total = len(tokens).
+3. **agi_test_honeytoken.py** — 10 групп: plant/уникальность/персист,
+   повторный plant, note с маркером, check_exfil (1/N маркеров, чистый
+   текст, пустой, None, чужой маркер), битый JSON стора, verify
+   (removed + corrupt), status, CLI subprocess (exit 0/1/2), check по
+   пути файла.
+4. Регрессия: 39/39 тестовых файлов PASS. Review: ✅ CLEAN
+   (366 строк, good practices: entry point/type hints/docstring).
+
+## Урок
+- TDD вскрыл дизайн-пробел: «verify целостности» без счётчика не видит
+  удаления — тест на missing после удаления записи упал, потребовался
+  planted_total. Счётчик «сколько посажено» проще и честнее томбстоунов.
+- agi_code_reviewer в песочнице требует AGI_REPO_DIR=/home/sandbox/hermes-agent
+  и AGI_REVIEWS_DIR=/home/sandbox/data/reviews (дефолт /root/.hermes
+  недоступен); ревью по хэшу «HEAD» = пустой дифф — нужен "HEAD~1..HEAD".
+
+## Следующие кандидаты
+- Интеграция: check_exfil на экспортах сессий/email в proactive_scan.
+- Реальный plant на хосте (вне песочницы) для боевого стора.
