@@ -71,7 +71,9 @@ def test_retain_empty():
     print("retain: пустая БД")
     _clear_memory()
     res = cs.retain_memory()
-    check("все счётчики 0", res == {"evicted_stale": 0, "evicted_cap": 0, "long_left": 0})
+    check("все счётчики 0",
+          res == {"evicted_stale": 0, "evicted_cap": 0,
+                  "demoted_medium": 0, "long_left": 0})
 
 
 def test_retain_fresh_survives():
@@ -180,7 +182,7 @@ def test_retain_min_accesses_disabled():
 
 
 def test_retain_only_long_tier():
-    print("retain: другие тиры не трогаются")
+    print("retain: short не трогается; stale medium decay→short (цикл 29)")
     _clear_memory()
     cs.store_memory("old_medium", "v", tier="medium")
     cs.store_memory("old_short", "v", tier="short")
@@ -188,7 +190,8 @@ def test_retain_only_long_tier():
     _set_access("old_medium", 0)
     res = cs.retain_memory(long_ttl_days=30, min_long_accesses=5)
     check("stale=0", res["evicted_stale"] == 0)
-    check("medium на месте", cs.get_memory("old_medium")["tier"] == "medium")
+    check("medium decay→short",
+          cs.get_memory("old_medium")["tier"] == "short")
     check("short на месте", cs.get_memory("old_short")["tier"] == "short")
 
 

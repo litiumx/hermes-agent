@@ -617,26 +617,46 @@ def list_memory(tier: str = None) -> list[dict]:
 
 
 def retain_memory(max_long: int = 200, long_ttl_days: int = 30,
-                  min_long_accesses: int = 5) -> dict:
-    """Ретеншн long-тира: эвикция невостребованных фактов.
+                  min_long_accesses: int = 5,
+                  medium_ttl_days: int = 7,
+                  min_medium_accesses: int = 2) -> dict:
+    """Ретеншн long-тира + decay medium-тира (Saucedo).
 
-    - stale: long с (last_access=0 ИЛИ last_access < now - long_ttl_days)
+    - stale (long): long с (last_access=0 ИЛИ last_access < now - long_ttl_days)
       И access_count < min_long_accesses → удаляются. Оба условия (AND):
       старый, но часто читаемый факт — ценный, остаётся.
-    - cap: если long осталось > max_long → удаляются самые старые по
+    - cap (long): если long осталось > max_long → удаляются самые старые по
       last_access (затем по id — детерминизм), пока не останется max_long.
+    - decay (medium): medium с (last_access=0 ИЛИ last_access < now -
+      medium_ttl_days) И access_count < min_medium_accesses → ПОНИЖАЮТСЯ до
+      short (факт не теряется, но теряет консолидированный статус; updated_at
+      сбрасывается — повторная консолидация только после свежего доступа).
+      Без decay нечитаемые medium по возрасту ПРОМОУТИЛИСЬ бы в long
+      (consolidate: medium→long при updated_at < medium_ttl_days) — зомби в long.
 
     Отключение: long_ttl_days<=0 или min_long_accesses<=0 → stale-чистка
-    выключена; max_long<=0 → cap выключен.
+    выключена; medium_ttl_days<=0 или min_medium_accesses<=0 → decay выключен;
+    max_long<=0 → cap выключен.
 
-    Возвращает {'evicted_stale': n, 'evicted_cap': n, 'long_left': n}.
-    Audit 'memory_retain' при ненулевых эвикциях.
+    Возвращает {'evicted_stale': n, 'evicted_cap': n, 'demoted_medium': n,
+                'long_left': n}.
+    Audit 'memory_retain' при ненулевых эвикциях/демоциях.
     """
     _ensure_db()
     now = time.time()
     evicted_stale = 0
     evicted_cap = 0
+    demoted_medium = 0
     with _get_conn() as conn:
+        if medium_ttl_days > 0 and min_medium_accesses > 0:
+            med_cutoff = now - medium_ttl_days * 86400
+            demoted_medium = conn.execute(
+                "UPDATE memory_items SET tier = 'short', updated_at = ?"
+                " WHERE tier = 'medium'"
+                " AND (last_access = 0 OR last_access < ?)"
+                " AND access_count < ?",
+                (now, med_cutoff, min_medium_accesses),
+            ).rowcount
         if long_ttl_days > 0 and min_long_accesses > 0:
             cutoff = now - long_ttl_days * 86400
             evicted_stale = conn.execute(
@@ -658,11 +678,12 @@ def retain_memory(max_long: int = 200, long_ttl_days: int = 30,
                 ).rowcount
         conn.commit()
     long_left = memory_stats()["long"]
-    if evicted_stale or evicted_cap:
+    if evicted_stale or evicted_cap or demoted_medium:
         append_audit("memory_retain",
-                     {"evicted_stale": evicted_stale, "evicted_cap": evicted_cap})
+                     {"evicted_stale": evicted_stale, "evicted_cap": evicted_cap,
+                      "demoted_medium": demoted_medium})
     return {"evicted_stale": evicted_stale, "evicted_cap": evicted_cap,
-            "long_left": long_left}
+            "demoted_medium": demoted_medium, "long_left": long_left}
 
 
 def vacuum():
@@ -805,6 +826,16 @@ if __name__ == "__main__":
             res = retain_memory(max_long, ttl, min_acc)
             print(f"retained: stale={res['evicted_stale']}, "
                   f"cap={res['evicted_cap']}, long_left={res['long_left']}")
+        elif cmd == "mem-maintain":
+            max_long = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+            ttl = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+            min_acc = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+            med_ttl = int(sys.argv[5]) if len(sys.argv) > 5 else 7
+            med_min_acc = int(sys.argv[6]) if len(sys.argv) > 6 else 2
+            retain = retain_memory(max_long, ttl, min_acc, med_ttl, med_min_acc)
+            cons = consolidate_memory()
+            print(json.dumps({"retain": retain, "consolidate": cons},
+                             ensure_ascii=False))
         else:
             print(get_report())
     else:

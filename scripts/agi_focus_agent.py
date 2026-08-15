@@ -28,6 +28,7 @@ TOKEN_ACT = 0.65
 MAX_COMPRESSIONS_PER_TASK = 6
 COMPACT_COOLDOWN_H = 6    # не чаще раза в 6 часов реальной компакции
 SUGGEST_COOLDOWN_H = 3    # не чаще раза в 3 часа повторных советов "watch"
+MEMORY_MAINTAIN_COOLDOWN_H = 24  # ретеншн памяти — раз в сутки
 
 def compress_with_headroom(text: str, min_len: int = 500) -> str:
     """Сжать текст через headroom library. Если <min_len или ошибка — вернуть как есть."""
@@ -217,6 +218,19 @@ def _last_event_time(event_type: str) -> float:
     return 0
 
 
+def _memory_maintenance():
+    """Ежедневный ретеншн multi-tier памяти: retain (medium decay + long
+    eviction) → consolidate (порядок важен: decay СНАЧАЛА, иначе consolidate
+    промоутит нечитаемые medium в long по возрасту). None при ошибке — тихий
+    отказ, не роняем цикл."""
+    try:
+        import agi_context_store as cs
+        return {"retain": cs.retain_memory(),
+                "consolidate": cs.consolidate_memory()}
+    except Exception:
+        return None
+
+
 def auto_focus_cycle():
     """Главный цикл — вызывать из крона каждые 30 мин.
     С кулдаунами: компакция не чаще COMPACT_COOLDOWN_H, советы watch не чаще
@@ -234,6 +248,19 @@ def auto_focus_cycle():
     # Порог по токенам (1M окно DeepSeek V4) с фолбэком на счётчик сообщений
     tok_ratio = tokens / 1_000_000 if tokens else 0
     now_ts = time.time()
+
+    # Grow point 29: ежедневный ретеншн памяти (medium decay → long eviction
+    # → consolidate). Включён ТОЛЬКО при AGI_MAINTAIN_MEMORY=1 — защита от
+    # случайного трогания prod-БД в тестах/песочнице. Кулдаун 24ч.
+    if os.environ.get("AGI_MAINTAIN_MEMORY") == "1":
+        last_m = _last_event_time("memory_maintain")
+        if now_ts - last_m > MEMORY_MAINTAIN_COOLDOWN_H * 3600:
+            maint = _memory_maintenance()
+            if maint is not None:
+                _log_event({"time": datetime.now().isoformat(),
+                            "type": "memory_maintain"})
+                result["memory_maintained"] = maint
+
     # Оценка по количеству сообщений (эвристика: 200 сообщений ≈ 50% окна)
     if tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
         last = _last_event_time("compaction")
