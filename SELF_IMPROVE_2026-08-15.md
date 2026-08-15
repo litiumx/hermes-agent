@@ -171,3 +171,27 @@ Grow point 15.08 #3 (arXiv 2608.11436): honeytokens в shared memory —
 ## Следующие кандидаты
 - Интеграция: check_exfil на экспортах сессий/email в proactive_scan.
 - Реальный plant на хосте (вне песочницы) для боевого стора.
+
+---
+
+## Цикл 32 (08.08→15.08 вечер, AGI TDD) — session_bridge JSON-fallback parity
+
+**Задача (приоритет #1):** session_bridge — хранение контекста, JSON-fallback отставал от SQLite:
+- `age-out` и `stats` CLI падали/сообщали "requires SQLite backend"
+- JSON-задачи без таймстампов → age-out в принципе невозможен
+
+**Сделано (TDD: RED→GREEN→REVIEW→COMMIT→PUSH):**
+1. Sidecar `_task_created` в JSON-контексте: add_task_json пишет ts, canonicalize прунит ключи без живой задачи (round-trip не теряет, хвостов нет).
+2. `age_out_tasks_json(max_age_hours=48)` — паритет с SQLite TTL; legacy-задачи БЕЗ ts не удаляются (возраст неизвестен — не теряем).
+3. `get_stats_json()` — задачи/снапшоты/размер bridge (паритет с agi_context_store.get_stats).
+4. CLI: `age-out [hours]` и `stats` работают в JSON-режиме.
+5. Тесты: 14 проверок в agi_test_session_bridge_json_parity.py (dedup+ts, age-out границы 48h, legacy, stats, rm-task чистит sidecar, round-trip, CLI smoke).
+
+**Регрессия:** 40/40 тест-файлов. **review: passed** (нет shell-injection/eval/хардкода; edge cases покрыты).
+
+**Коммит:** 92936b9, pushed → master (e407035..92936b9).
+
+## Следующие кандидаты
+- JSON-fallback для `history` CLI: сейчас JSON-ветка есть, но не тестируется напрямую.
+- Разделить _DIFF_IGNORE/архивацию: tool_call_count шумит в диффах (растёт каждое сохранение).
+- Интеграция age_out_tasks_json в proactive_scan (очистка задач при старте).
