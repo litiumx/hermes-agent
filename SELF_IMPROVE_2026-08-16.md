@@ -36,3 +36,44 @@ SQLite-ветка (get_session_history) фильтрует по окну час�
   и вывод истории при старте).
 - Разделить _DIFF_IGNORE/архивацию: tool_call_count шумит в диффах.
 - check_exfil honeytoken на экспортах сессий/email в proactive_scan.
+
+---
+
+# SELF_IMPROVE — 2026-08-16 (AGI Coding Cycle 34)
+
+## Цель цикла
+Grow point из цикла 33: «Интеграция age_out_tasks_json + history_json
+в proactive_scan (очистка задач и вывод истории при старте)».
+
+## Сделано (коммит a0c6329, ветка master, pushed)
+1. **scripts/agi_scan_context.py** — новый модуль-мост для proactive_scan:
+   - `cleanup_stale_tasks(max_age_hours)` — возрастная очистка pending-задач
+     (обёртка над age_out_tasks_json), возвращает число удалённых;
+   - `session_history_lines(hours, limit)` — история сессий из JSON-снапшотов
+     (history_json) в CLI-формате, новые→старые, limit обрезает;
+   - `context_block(hours, limit)` — готовый блок «📜 Сессии (N ч)» + строка
+     «🧹 Очищено устаревших задач: N» только при >0;
+   - Всё молча падает в дефолты (try/except) — скан не валится без bridge.
+2. **scripts/proactive_scan.py** — при старте печатает context_block()
+   (после legacy session summary), тоже в try/except.
+3. **scripts/agi_test_scan_context.py** — 8 pytest-проверок: cleanup
+   (старые удаляются / legacy без ts сохраняется / пусто и нет файла),
+   история (сортировка, фильтр окна с запасом ≥1ч, limit, битые снапшоты,
+   legacy ts=0), context_block (полный/пустой, capsys).
+
+## Регрессия: 42/42 тест-файлов (было 41). review: passed (без
+subprocess/exec/хардкода; edge cases: пустые входы, битые файлы, legacy,
+границы окна).
+
+## Замечания по процессу
+- Старые тест-файлы — скриптовый стиль (check/main), НЕ pytest:
+  `pytest scripts/agi_test_*.py` их не видит. Регрессия = цикл
+  `python3 scripts/agi_test_*.py` по каждому файлу.
+- pytest-файлы (новый стиль) тоже исполняемы как скрипты через
+  `if __name__ == "__main__": pytest.main([__file__, -v])` — единый цикл работает.
+
+## Следующие кандидаты
+- Разделить _DIFF_IGNORE/архивацию: tool_call_count шумит в диффах.
+- check_exfil honeytoken на экспортах сессий/email в proactive_scan.
+- Дедуп proactive_scan: legacy session_bridge summary + новый context_block
+  могут дублировать «последняя задача» — рассмотреть переход на get_session_summary.
