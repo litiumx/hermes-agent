@@ -89,7 +89,7 @@ def save_context(context: dict, snapshot: bool = True) -> str:
     return _format_diff(diff) if diff else "no changes (JSON)"
 
 
-_DIFF_IGNORE = {"timestamp", "_task_created"}  # регенерируется при каждом сохранении — не информативен в диффе
+_DIFF_IGNORE = {"timestamp", "_task_created", "tool_call_count"}  # регенерируется/растёт при каждом сохранении — не информативен в диффе
 
 
 def load_context() -> dict:
