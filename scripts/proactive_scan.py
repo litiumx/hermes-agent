@@ -13,6 +13,15 @@ try:
 except Exception:
     pass
 
+# Контекст сессии (цикл 34): история JSON-снапшотов + очистка устаревших задач.
+# Молча падает в дефолт, если bridge недоступен — скан не должен валиться.
+try:
+    from agi_scan_context import context_block
+    print(context_block())
+    print()
+except Exception:
+    pass
+
 def run(cmd, timeout=10):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
