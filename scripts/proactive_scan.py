@@ -22,6 +22,15 @@ try:
 except Exception:
     pass
 
+# Exfil-проверка (цикл 36): хонейтокены в экспортах сессий/email.
+# Молча пропускается, если модуль/стор недоступны.
+try:
+    from agi_scan_exfil import exfil_block
+    print(exfil_block())
+    print()
+except Exception:
+    pass
+
 def run(cmd, timeout=10):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
