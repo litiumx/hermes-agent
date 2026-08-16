@@ -241,6 +241,46 @@ def get_stats_json() -> dict:
     }
 
 
+def history_json(hours: float = 24) -> list:
+    """История сессий из JSON-снапшотов (fallback-бэкенд, цикл 33).
+
+    Паритет с SQLite-веткой get_session_history(hours):
+    - фильтр по окну часов (снапшоты старше cutoff отбрасываются);
+    - сортировка новые -> старые;
+    - снапшот БЕЗ timestamp считается «возраст неизвестен» и ВКЛЮЧАЕТСЯ
+      (та же политика, что в age_out_tasks_json — не теряем legacy-данные);
+    - битые снапшоты (JSONDecodeError/OSError) пропускаются, остальные целы.
+    Возвращает записи {timestamp, session_phase, last_task} (ts=0 для legacy).
+    """
+    if not HISTORY_DIR.exists():
+        return []
+    cutoff = time.time() - hours * 3600
+    entries = []
+    for s in sorted(HISTORY_DIR.glob("snapshot_*.json"), reverse=True):
+        try:
+            data = json.loads(s.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        ts = data.get("timestamp")
+        if isinstance(ts, (int, float)) and ts < cutoff:
+            continue  # старше окна
+        entries.append({
+            "timestamp": ts if isinstance(ts, (int, float)) else 0,
+            "session_phase": data.get("session_phase", "?"),
+            "last_task": data.get("last_task", "?"),
+        })
+    return entries
+
+
+def _format_history_line(entry: dict) -> str:
+    """Формат CLI history: [дд.мм чч:мм] [фаза] задача. ts=0 (legacy) -> '??.?? ??:??'."""
+    if entry.get("timestamp"):
+        ts = time.strftime("%d.%m %H:%M", time.localtime(entry["timestamp"]))
+    else:
+        ts = "??.?? ??:??"
+    return f"[{ts}] [{entry.get('session_phase', '?')}] {entry.get('last_task', '?')[:60]}"
+
+
 def _archive_snapshot(ctx: dict):
     """Сохранить снимок в историю, ротировать старые."""
     _ensure_dirs()
@@ -393,17 +433,10 @@ if __name__ == "__main__":
         hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
         if _USE_SQLITE:
             for h in _sql_history_safe(hours):
-                ts = time.strftime("%d.%m %H:%M", time.localtime(h["timestamp"]))
-                print(f"[{ts}] [{h['session_phase']}] {h['last_task'][:60]}")
+                print(_format_history_line(h))
         else:
-            snapshots = sorted(HISTORY_DIR.glob("snapshot_*.json"), reverse=True)
-            for s in snapshots:
-                try:
-                    data = json.loads(s.read_text())
-                    ts = time.strftime("%d.%m %H:%M", time.localtime(data.get("timestamp", 0)))
-                    print(f"[{ts}] [{data.get('session_phase', '?')}] {data.get('last_task', '?')[:60]}")
-                except Exception:
-                    pass
+            for h in history_json(hours):
+                print(_format_history_line(h))
     elif len(sys.argv) > 1 and sys.argv[1] == "stats":
         if _USE_SQLITE:
             stats = _store_call("get_stats")
