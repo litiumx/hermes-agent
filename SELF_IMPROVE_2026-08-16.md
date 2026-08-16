@@ -77,3 +77,36 @@ subprocess/exec/хардкода; edge cases: пустые входы, биты�
 - check_exfil honeytoken на экспортах сессий/email в proactive_scan.
 - Дедуп proactive_scan: legacy session_bridge summary + новый context_block
   могут дублировать «последняя задача» — рассмотреть переход на get_session_summary.
+
+# SELF_IMPROVE — 2026-08-16 (AGI Coding Cycle 35)
+
+## Цель цикла
+Grow point из цикла 34: «Разделить _DIFF_IGNORE/архивацию: tool_call_count
+шумит в диффах». Монотонный счётчик менялся при КАЖДОМ сохранении и всегда
+попадал в diff, засоряя вывод save_context.
+
+## Сделано (коммит 77e83cd, ветка master, pushed)
+1. **tool_call_count добавлен в `_DIFF_IGNORE`** в agi_session_bridge.py —
+   счётчик исключён из diff-шума, но ПРОДОЛЖАЕТ храниться в контексте
+   (load_context возвращает актуальное значение; архивация снапшотов не тронута).
+2. **scripts/agi_test_diff_ignore_noise.py** — 6 групп проверок: diff пуст при
+   изменении только счётчика; save_context → "no changes (JSON)"; реальные
+   изменения (last_task) видны без tool_call_count; счётчик сохраняется;
+   edge: отсутствие счётчика в prev/curr не даёт шума; счётчик + реальное
+   изменение → в diff только реальное.
+
+## Регрессия: 43/43 тест-файлов (было 42). review: passed (без
+subprocess/exec/хардкода; edge cases: пустые входы, отсутствие ключа).
+
+## Замечания по процессу
+- Регрессия по exit code, а не grep по выводу: тест-файлы используют разные
+  форматы отчёта ("ALL TESTS PASS", "RESULT: N passed", "ИТОГ:", pytest),
+  grep-паттерны дважды давали ложные FAIL. `python3 $f; echo $?` — единый
+  надёжный индикатор.
+
+## Следующие кандидаты
+- check_exfil honeytoken на экспортах сессий/email в proactive_scan.
+- Дедуп proactive_scan: legacy session_bridge summary + context_block могут
+  дублировать «последняя задача» — рассмотреть переход на get_session_summary.
+- Архивация: _archive_snapshot пишет ВЕСЬ ctx включая tool_call_count —
+  проверить, нужен ли счётчик в снапшотах истории (экономия размера).
