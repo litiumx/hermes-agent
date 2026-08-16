@@ -110,3 +110,47 @@ subprocess/exec/хардкода; edge cases: пустые входы, отсу�
   дублировать «последняя задача» — рассмотреть переход на get_session_summary.
 - Архивация: _archive_snapshot пишет ВЕСЬ ctx включая tool_call_count —
   проверить, нужен ли счётчик в снапшотах истории (экономия размера).
+
+# SELF_IMPROVE — 2026-08-16 (AGI Coding Cycle 36)
+
+## Цель цикла
+Grow point из цикла 35: «check_exfil honeytoken на экспортах сессий/email
+в proactive_scan». Хонейтокены (agi_honeytoken.py) закрывают вектор
+«память → внешний контент»; теперь стартовый скан ищет приманки в файлах
+экспортов (сессии, email, логи).
+
+## Сделано (коммит 0e2f4d4, ветка master, pushed)
+1. **scripts/agi_scan_exfil.py** — мост для proactive_scan (по образцу
+   agi_scan_context.py):
+   - `scan_exports(dirs, store_path)` — рекурсивный обход каталогов,
+     прогон каждого файла через ht.check_exfil; лимиты: max_size=2MB/файл,
+     max_files=200; расширения .json/.md/.txt/.log/.eml; дефолт каталогов
+     $HERMES_HOME/data/{exports,sessions}, env AGI_EXFIL_DIRS (':') —
+     переопределение; пустой/битый стор, нет каталога → [];
+   - `exfil_block()` — «🛡️ Exfil: чисто (N приманок, M каталогов)» /
+     «🔴 Exfil: LEAK — N файл(ов): <file> -> <markers>» / подсказка plant
+     при пустом сторе. Без исключений.
+2. **scripts/proactive_scan.py** — вызов exfil_block() после context_block,
+   в try/except (молча пропускается).
+3. **scripts/agi_test_scan_exfil.py** — 12 pytest-проверок: пустой стор,
+   детект маркера, чистые файлы, нет каталога, битый стор, oversize,
+   чужие расширения, рекурсия, несколько маркеров в файле, блоки
+   clean/leak/пустой стор.
+
+## Регрессия: 44/44 тест-файлов (было 43). review: passed (без
+subprocess/exec/хардкода; edge cases: пустые входы, битый стор, лимиты,
+рекурсия).
+
+## Замечания по процессу
+- check_exfil(str(path)) сам определяет файл и читает с errors="replace" —
+  мост не дублирует чтение; для oversize-фильтра нужен только stat.
+- Живой прогон proactive_scan в песочнице: стор пуст → печатается
+  подсказка plant (правильное поведение, не молчание).
+
+## Следующие кандидаты
+- Дедуп proactive_scan: legacy session_bridge summary + context_block могут
+  дублировать «последняя задача» — переход на get_session_summary.
+- Архивация: _archive_snapshot пишет ВЕСЬ ctx включая tool_call_count —
+  нужен ли счётчик в снапшотах истории (экономия размера).
+- Автопосадка приманок: если стор пуст N дней — proactive_scan сам зовёт
+  plant(3) (сейчас только подсказка).
