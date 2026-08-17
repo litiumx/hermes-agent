@@ -10,8 +10,10 @@
 (свежий/stale/коррумпированный лог), интеграция с мутациями
 (save/add/remove/age_out/prune), не ломает существующее поведение.
 """
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -20,7 +22,24 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agi_context_store as cs
 
-TMP = tempfile.mkdtemp(prefix="agi_audit_test_")
+# Все temp-директории теста регистрируются и удаляются при выходе —
+# иначе каждый прогон оставляет agi_audit_iso_* в /tmp (мусор 96% tmpfs).
+_TMP_DIRS = []
+
+
+def _track(tmp):
+    _TMP_DIRS.append(tmp)
+    return tmp
+
+
+def _cleanup_tmp():
+    for d in _TMP_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+atexit.register(_cleanup_tmp)
+
+TMP = _track(tempfile.mkdtemp(prefix="agi_audit_test_"))
 cs.DB_PATH = Path(TMP) / "test.db"
 
 PASS = 0
@@ -39,7 +58,7 @@ def check(name, cond):
 
 def fresh_db():
     """Изолированная БД для тестов с абсолютными счётчиками."""
-    cs.DB_PATH = Path(tempfile.mkdtemp(prefix="agi_audit_iso_")) / "iso.db"
+    cs.DB_PATH = Path(_track(tempfile.mkdtemp(prefix="agi_audit_iso_"))) / "iso.db"
 
 
 def test_append_get():
@@ -97,7 +116,7 @@ def test_rebuild_idempotent():
 
 def test_summary_zero():
     print("empty db summary")
-    fresh = tempfile.mkdtemp(prefix="agi_audit_zero_")
+    fresh = _track(tempfile.mkdtemp(prefix="agi_audit_zero_"))
     old_path = cs.DB_PATH
     cs.DB_PATH = Path(fresh) / "z.db"
     try:
