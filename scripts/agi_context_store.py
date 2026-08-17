@@ -94,11 +94,27 @@ def _ensure_db():
                 last_access REAL NOT NULL DEFAULT 0
             )
         """)
+        # Temporal supersession (MemClaw): append-only история перезаписей.
+        # Старый value НЕ удаляется при update — хранится как superseded
+        # версия с provenance (что было, чем заменено, когда). Переживает
+        # eviction из memory_items (retain_memory) — защита от provenance
+        # collapse (инцидент MemGhost).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL,
+                old_value TEXT NOT NULL,
+                old_tier TEXT NOT NULL,
+                new_value TEXT NOT NULL,
+                superseded_at REAL NOT NULL
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_hash ON pending_tasks(task_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created ON pending_tasks(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ts ON sessions(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tier ON memory_items(tier)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memhist_key ON memory_history(key)")
         conn.commit()
 
 
@@ -477,7 +493,7 @@ def store_memory(key: str, value: str, tier: str = "short") -> bool:
     now = time.time()
     with _get_conn() as conn:
         exists = conn.execute(
-            "SELECT id FROM memory_items WHERE key = ?", (key,)
+            "SELECT id, value, tier FROM memory_items WHERE key = ?", (key,)
         ).fetchone()
         new = exists is None
         if new:
@@ -487,6 +503,14 @@ def store_memory(key: str, value: str, tier: str = "short") -> bool:
                 (key, value, tier, now, now),
             )
         else:
+            # Temporal supersession: value изменился — старый факт НЕ теряем,
+            # фиксируем superseded-версию (provenance) до обновления.
+            if exists["value"] != value:
+                conn.execute(
+                    "INSERT INTO memory_history (key, old_value, old_tier,"
+                    " new_value, superseded_at) VALUES (?, ?, ?, ?, ?)",
+                    (key, exists["value"], exists["tier"], value, now),
+                )
             conn.execute(
                 "UPDATE memory_items SET value = ?, tier = ?, updated_at = ?"
                 " WHERE key = ?",
@@ -496,6 +520,40 @@ def store_memory(key: str, value: str, tier: str = "short") -> bool:
     if new:
         append_audit("memory_store", {"key": key[:80], "tier": tier})
     return new
+
+
+def get_memory_history(key: str = None, limit: int = 50) -> list[dict]:
+    """История перезаписей факта (superseded версии), newest-first.
+
+    key=None — все ключи. Пусто → []. Append-only: записи не редактируются
+    и переживают удаление факта из memory_items.
+    """
+    if key is not None and (not isinstance(key, str) or not key.strip()):
+        return []
+    if not isinstance(limit, int) or limit < 1:
+        limit = 50
+    _ensure_db()
+    sql = ("SELECT key, old_value, old_tier, new_value, superseded_at"
+           " FROM memory_history")
+    args = ()
+    if key is not None:
+        sql += " WHERE key = ?"
+        args = (key.strip(),)
+    sql += " ORDER BY id DESC LIMIT ?"
+    with _get_conn() as conn:
+        rows = conn.execute(sql, args + (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def memory_history_stats() -> dict:
+    """Статистика superseded-истории: {'total': n, 'keys': n}."""
+    _ensure_db()
+    with _get_conn() as conn:
+        total = conn.execute("SELECT COUNT(*) as c FROM memory_history").fetchone()["c"]
+        keys = conn.execute(
+            "SELECT COUNT(DISTINCT key) as c FROM memory_history"
+        ).fetchone()["c"]
+    return {"total": total, "keys": keys}
 
 
 def get_memory(key: str) -> dict | None:
@@ -707,6 +765,9 @@ def get_report() -> str:
     lines.append(f"  ⏰ TTL задач: {stats['task_ttl_hours']}ч")
     mem = memory_stats()
     lines.append(f"  🧠 Память: short {mem['short']} / medium {mem['medium']} / long {mem['long']}")
+    mh = memory_history_stats()
+    if mh["total"]:
+        lines.append(f"  🕘 Superseded версий: {mh['total']} ({mh['keys']} ключей)")
 
     if ctx:
         lines.append(f"\n  🧠 Последняя сессия:")
