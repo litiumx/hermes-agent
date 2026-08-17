@@ -19,12 +19,15 @@ API:
   check_exfil(text, store_path=None) -> list[dict]
   verify(store_path=None) -> dict
   status(store_path=None) -> dict
+  ensure_coverage(min_tokens=3, empty_days=7, store_path=None) -> dict
+      — автопосадка приманок: пустой стор N дней -> посадка (цикл 39)
 
 CLI:
   plant <n>            — посадить N приманок
   check <text|file>    — искать маркеры в тексте или файле (exit 1 = утечка)
   verify               — целостность стора (exit 1 = пропажа)
   status               — сводка
+  auto-plant [--min N] [--days N] — автопосадка по правилу empty_days
 
 Безопасность: чистый Python + JSON, без сети/shell. Маркеры не секреты —
 это детекторы; их наличие в сторе безопасно.
@@ -65,7 +68,7 @@ def _load(store_path=None) -> dict:
         return {"honeytokens": [], "planted_total": 0}
     if not isinstance(data.get("planted_total"), int):
         data["planted_total"] = len(data["honeytokens"])
-    return data
+    return data  # незнакомые ключи (empty_since и пр.) сохраняются
 
 
 def _save(data: dict, store_path=None) -> None:
@@ -81,10 +84,8 @@ def _new_marker(existing: set) -> str:
             return m
 
 
-def plant(n: int = 3, note: str = None, store_path=None) -> list:
-    """Посадить n новых приманок. Возвращает созданные записи."""
-    n = max(1, int(n))
-    data = _load(store_path)
+def _plant_into(data: dict, n: int, store_path=None, note: str = None) -> list:
+    """Добавить n приманок в УЖЕ загруженный стор (общий для plant/ensure_coverage)."""
     existing = {t["marker"] for t in data["honeytokens"]
                 if isinstance(t, dict) and t.get("marker")}
     created = []
@@ -100,8 +101,67 @@ def plant(n: int = 3, note: str = None, store_path=None) -> list:
         existing.add(marker)
         created.append(rec)
     data["planted_total"] = data.get("planted_total", len(data["honeytokens"]) - n) + n
+    return created
+
+
+def plant(n: int = 3, note: str = None, store_path=None) -> list:
+    """Посадить n новых приманок. Возвращает созданные записи."""
+    n = max(1, int(n))
+    data = _load(store_path)
+    created = _plant_into(data, n, store_path, note)
     _save(data, store_path)
     return created
+
+
+def ensure_coverage(min_tokens: int = 3, empty_days: int = 7,
+                    store_path=None) -> dict:
+    """Автопосадка приманок: покрытие детекции не теряется (цикл 39).
+
+    Правило (grow point WEEKLY_REVIEW_2026-08-17):
+    - valid >= min_tokens  -> no-op, reason="ok"
+    - 0 < valid < min      -> досадка сразу, reason="topup" (частичное
+      покрытие не ждёт — дыру закрываем немедленно)
+    - valid == 0           -> пустой стор: первый вызов ставит empty_since,
+      посадка только когда пусто >= empty_days дней; empty_days=0 -> сразу.
+      reason="waiting"/"planted"
+    Валидной считается запись с marker И planted_at (битые не в счёт).
+    Возвращает {"planted": int, "reason": str, "empty_since": float|None}.
+    """
+    min_tokens = max(1, int(min_tokens))
+    empty_days = max(0, int(empty_days))
+    data = _load(store_path)
+    valid = [t for t in data.get("honeytokens", [])
+             if isinstance(t, dict) and t.get("marker") and t.get("planted_at")]
+    now = time.time()
+    if len(valid) >= min_tokens:
+        return {"planted": 0, "reason": "ok"}
+    if valid:  # частичное покрытие — досадка без ожидания
+        n = min_tokens - len(valid)
+        _plant_into(data, n, store_path)
+        data["empty_since"] = None
+        _save(data, store_path)
+        return {"planted": n, "reason": "topup"}
+    # стор пуст: ждём empty_days с момента empty_since
+    empty_since = data.get("empty_since")
+    try:
+        empty_since = float(empty_since)
+    except (TypeError, ValueError):
+        empty_since = None  # битая метка = первый вызов
+    if empty_since is None:
+        if empty_days <= 0:
+            _plant_into(data, min_tokens, store_path)
+            data["empty_since"] = None
+            _save(data, store_path)
+            return {"planted": min_tokens, "reason": "planted"}
+        data["empty_since"] = now
+        _save(data, store_path)
+        return {"planted": 0, "reason": "waiting", "empty_since": now}
+    if now - float(empty_since) < empty_days * 86400:
+        return {"planted": 0, "reason": "waiting", "empty_since": empty_since}
+    _plant_into(data, min_tokens, store_path)
+    data["empty_since"] = None
+    _save(data, store_path)
+    return {"planted": min_tokens, "reason": "planted"}
 
 
 def _read_text(text) -> str:
@@ -200,6 +260,23 @@ def _cli(argv):
     if cmd == "status":
         st = status()
         print(f"honeytokens: {st['total']}, oldest {st['oldest_age_h']}h, store: {st['store']}")
+        return 0
+    if cmd == "auto-plant":
+        min_tokens, empty_days = 3, 7
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--min" and i + 1 < len(argv):
+                min_tokens = int(argv[i + 1]); i += 2
+            elif argv[i] == "--days" and i + 1 < len(argv):
+                empty_days = int(argv[i + 1]); i += 2
+            else:
+                i += 1
+        res = ensure_coverage(min_tokens=min_tokens, empty_days=empty_days)
+        if res["planted"]:
+            print(f"planted {res['planted']} (reason: {res['reason']})")
+        else:
+            print(f"no plant (reason: {res['reason']})")
+        print(f"total: {status()['total']}")
         return 0
     print(f"unknown command: {cmd}")
     return 2
