@@ -34,3 +34,25 @@ provenance collapse (инцидент MemGhost). Старую версию не�
 
 ## Урок
 3 ложных FAIL на первом прогоне — не код, а ТЕСТ: путал ASC-порядок raw-чтения (ORDER BY id — старые сверху) и семантику return store_memory (новый ключ=True). Сначала проверять инварианты теста, потом код.
+
+## Цикл 39 — автопосадка honeytoken при пустом сторе (WEEKLY_REVIEW 17.08, план недели #1)
+Проблема: если стор приманок пуст (чистка, сбой, удаление), детекция выноса
+молча теряет покрытие — никто не заметит, пока не поздно.
+
+**Решение** в scripts/agi_honeytoken.py:
+- `ensure_coverage(min_tokens=3, empty_days=7)` — автопосадка по правилу:
+  valid >= min → no-op; 0 < valid < min → досадка сразу (дыра не ждёт);
+  valid == 0 → empty_since-метка, посадка через empty_days дней (0 = сразу)
+- Битые записи (нет marker/planted_at) не в счёт; planted_total не теряет историю
+- `_load` теперь сохраняет незнакомые ключи (empty_since не исчезает при save)
+- Защита от битой метки: float() в try, мусор = первый вызов
+- CLI: `auto-plant [--min N] [--days N]` — точка входа для proactive_scan
+
+Тесты: agi_test_honeytoken_coverage.py (10 групп) — no-op, waiting до N дней,
+посадка после N дней, досадка, битые записи, идемпотентность, empty_days=0,
+CLI, planted_total. Регрессия: 47/47 файлов. review: passed.
+
+## Урок
+Ловушка read_file: русские докстринги в UTF-8 сбивают бинарный детектор
+(valid UTF-8, NUL нет, а read_file отказывается) — читать через python3.
+Сначала проверить `data.decode('utf-8')`, потом выбирать инструмент.
