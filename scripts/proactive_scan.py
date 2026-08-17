@@ -7,6 +7,13 @@ import subprocess, json, socket, os, sys
 try:
     from session_bridge import get_last_session_summary
     summary = get_last_session_summary()
+    # Дедуп (цикл 40): свежайшая запись истории — та же сессия, строка
+    # «Последняя задача» дублируется в блоке «Сессии». Убираем строку.
+    try:
+        from agi_scan_context import dedup_bridge_summary
+        summary = dedup_bridge_summary(summary)
+    except Exception:
+        pass
     if summary and "нет данных" not in summary.lower():
         print(summary)
         print()

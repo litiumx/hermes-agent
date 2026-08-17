@@ -57,6 +57,55 @@ def context_block(hours: float = DEFAULT_HISTORY_HOURS,
     return "\n".join(lines)
 
 
+def _task_from_history_line(line: str) -> str:
+    """Задача из строки истории '[дд.мм чч:мм] [фаза] задача'.
+    Всё после ВТОРОГО ']' — задача может содержать ']' (урок цикла 40).
+    Пустая строка, если формат не распознан."""
+    first = line.find("]")
+    if first == -1:
+        return ""
+    second = line.find("]", first + 1)
+    if second == -1:
+        return ""
+    return line[second + 1:].strip()
+
+
+def dedup_bridge_summary(summary: str,
+                         hours: float = DEFAULT_HISTORY_HOURS) -> str:
+    """Дедуп bridge-саммари против свежайшей записи истории (цикл 40).
+
+    proactive_scan печатает два блока: «Предыдущая сессия» (bridge) и
+    «Сессии (последние N ч)» (история). Свежайший снапшот истории — ЭТО
+    предыдущая сессия, поэтому строка «Последняя задача: X» дублируется.
+
+    Убираем ТОЛЬКО строку задачи (она видна в истории), остальную
+    информацию bridge (проекты, ошибки, ожидающие) сохраняем.
+    При любых ошибках/несовпадениях — саммари без изменений.
+    """
+    if not summary:
+        return summary
+    try:
+        task = ""
+        for line in summary.splitlines():
+            if line.strip().startswith("Последняя задача:"):
+                task = line.split(":", 1)[1].strip()
+                break
+        if not task:
+            return summary
+        history = session_history_lines(hours=hours, limit=1)
+        if not history:
+            return summary
+        hist_task = _task_from_history_line(history[0])
+        if not hist_task or task[:60] != hist_task[:60]:
+            return summary
+        return "\n".join(
+            line for line in summary.splitlines()
+            if not line.strip().startswith("Последняя задача:")
+        ).strip()
+    except Exception:
+        return summary
+
+
 def main():
     print(context_block())
 
