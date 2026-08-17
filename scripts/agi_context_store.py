@@ -115,6 +115,12 @@ def _ensure_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tier ON memory_items(tier)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memhist_key ON memory_history(key)")
+        # Миграция (цикл 38): provenance source — старые БД без колонки.
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(memory_history)")]
+        if "source" not in cols:
+            conn.execute(
+                "ALTER TABLE memory_history ADD COLUMN source TEXT NOT NULL DEFAULT 'agent'"
+            )
         conn.commit()
 
 
@@ -476,11 +482,13 @@ def _tier_index(tier: str) -> int:
         return -1
 
 
-def store_memory(key: str, value: str, tier: str = "short") -> bool:
+def store_memory(key: str, value: str, tier: str = "short", source: str = None) -> bool:
     """Сохранить факт в память. True если ключ НОВЫЙ.
 
     tier: short/medium/long. Повторный store обновляет value и tier,
     сохраняя access-историю. Невалидные входы → False без записи.
+    source: источник записи (user/email/agent) для provenance supersession;
+    пустой/не-строка → 'agent'.
     """
     if not isinstance(key, str) or not key.strip():
         return False
@@ -488,6 +496,10 @@ def store_memory(key: str, value: str, tier: str = "short") -> bool:
         return False
     if _tier_index(tier) < 0:
         return False
+    if not isinstance(source, str) or not source.strip():
+        source = "agent"
+    else:
+        source = source.strip()
     _ensure_db()
     key = key.strip()
     now = time.time()
@@ -508,8 +520,8 @@ def store_memory(key: str, value: str, tier: str = "short") -> bool:
             if exists["value"] != value:
                 conn.execute(
                     "INSERT INTO memory_history (key, old_value, old_tier,"
-                    " new_value, superseded_at) VALUES (?, ?, ?, ?, ?)",
-                    (key, exists["value"], exists["tier"], value, now),
+                    " new_value, superseded_at, source) VALUES (?, ?, ?, ?, ?, ?)",
+                    (key, exists["value"], exists["tier"], value, now, source),
                 )
             conn.execute(
                 "UPDATE memory_items SET value = ?, tier = ?, updated_at = ?"
@@ -533,7 +545,7 @@ def get_memory_history(key: str = None, limit: int = 50) -> list[dict]:
     if not isinstance(limit, int) or limit < 1:
         limit = 50
     _ensure_db()
-    sql = ("SELECT key, old_value, old_tier, new_value, superseded_at"
+    sql = ("SELECT key, old_value, old_tier, new_value, superseded_at, source"
            " FROM memory_history")
     args = ()
     if key is not None:
@@ -767,7 +779,13 @@ def get_report() -> str:
     lines.append(f"  🧠 Память: short {mem['short']} / medium {mem['medium']} / long {mem['long']}")
     mh = memory_history_stats()
     if mh["total"]:
-        lines.append(f"  🕘 Superseded версий: {mh['total']} ({mh['keys']} ключей)")
+        with _get_conn() as conn:
+            src_rows = conn.execute(
+                "SELECT source, COUNT(*) as c FROM memory_history"
+                " GROUP BY source ORDER BY c DESC"
+            ).fetchall()
+        src_part = ", ".join(f"{r['source']} {r['c']}" for r in src_rows)
+        lines.append(f"  🕘 Superseded версий: {mh['total']} ({mh['keys']} ключей; источники: {src_part})")
 
     if ctx:
         lines.append(f"\n  🧠 Последняя сессия:")

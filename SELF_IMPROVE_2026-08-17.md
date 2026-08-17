@@ -20,3 +20,17 @@ provenance collapse (инцидент MemGhost). Старую версию не�
 
 ## Урок
 Тесты на общую БД без фильтра по ключу → кросс-контаминация (9 ложных FAIL на первом прогоне). Валидировать тесты изолированно по ключу/фикстуре, не по глобальному счётчику.
+
+## Цикл 38 — provenance: колонка source в memory_history (SELF_IMPROVE #2)
+Проблема: superseded-версии хранили ЧТО и КОГДА, но не КТО перезаписал факт —
+источник (user/email/агент) терялся, provenance collapse оставался наполовину закрытым.
+
+**Решение** в agi_context_store.py:
+- `store_memory(key, value, tier="short", source=None)` — новый параметр; пустой/не-строка → 'agent', пробелы обрезаются
+- memory_history + колонка `source TEXT NOT NULL DEFAULT 'agent'`; миграция старых БД через PRAGMA table_info + ALTER TABLE в _ensure_db (обратная совместимость: legacy-строки получают 'agent')
+- `get_memory_history` возвращает source; get_report показывает разбивку источников ("источники: agent 2, email 1")
+
+Тесты: agi_test_memory_history_source.py (23) — default/явный/email, невалидные source (None/""/123), strip, несколько источников, API-слой, миграция старой схемы с сохранением строк, stats shape, отчёт. Регрессия: 46/46 файлов.
+
+## Урок
+3 ложных FAIL на первом прогоне — не код, а ТЕСТ: путал ASC-порядок raw-чтения (ORDER BY id — старые сверху) и семантику return store_memory (новый ключ=True). Сначала проверять инварианты теста, потом код.
