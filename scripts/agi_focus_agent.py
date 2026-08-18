@@ -29,6 +29,9 @@ MAX_COMPRESSIONS_PER_TASK = 6
 COMPACT_COOLDOWN_H = 6    # не чаще раза в 6 часов реальной компакции
 SUGGEST_COOLDOWN_H = 3    # не чаще раза в 3 часа повторных советов "watch"
 MEMORY_MAINTAIN_COOLDOWN_H = 24  # ретеншн памяти — раз в сутки
+REPEAT_WINDOW_SEC = 7200   # окно поиска повторов tool calls (2 часа)
+REPEAT_MIN = 3             # минимум одинаковых вызовов = «повтор»
+REPEAT_TOP = 5             # сколько повторяющихся сигнатур показывать
 
 def compress_with_headroom(text: str, min_len: int = 500) -> str:
     """Сжать текст через headroom library. Если <min_len или ошибка — вернуть как есть."""
@@ -201,6 +204,85 @@ def suggest_compact(reason: str):
     # Если у нас есть активная задача — автоматическая компрессия знаний
     return f"💡 Focus: {reason}. Knowledge block: {len(load_kb()['knowledge'])} записей."
 
+def _parse_ts(value) -> float:
+    """created_at → epoch float. Поддерживает float/ISO (в т.ч. Z-суффикс).
+    0 при нечитаемом — строка пропускается, не крах."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return 0.0
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        s = value.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+def detect_repeated_calls(db_path=None, window_sec=REPEAT_WINDOW_SEC,
+                          min_repeats=REPEAT_MIN, top=REPEAT_TOP):
+    """Детект повторяющихся tool calls в state.db — ранний сигнал деградации
+    контекста (SELF_IMPROVE 14.08 #2: на ~80K токенов в multi-step прогоне
+    начинаются повторяющиеся tool calls; компактить ПЕРВЫМ делом, не дожидаясь
+    порога 70%). Считает одинаковые сигнатуры (tool + аргументы с
+    нормализацией порядка ключей) в окне window_sec.
+
+    Возвращает список dict {tool, args, count} (топ по count) или [] при
+    ошибке/пустоте. Тихий отказ: нет БД/таблицы/колонки/битый JSON/битый ts —
+    всё пропускается, исключения не кидаются."""
+    db = db_path or SESSION_STATE
+    cutoff = time.time() - window_sec
+    sig_counts = {}
+    sig_example = {}
+    try:
+        conn = sqlite3.connect(db)
+        cur = conn.execute(
+            "SELECT role, tool_calls, created_at FROM messages")
+        for role, tc_json, created_at in cur.fetchall():
+            if role != "assistant" or not tc_json:
+                continue
+            ts = _parse_ts(created_at)
+            if ts <= 0 or ts < cutoff:
+                continue
+            try:
+                calls = json.loads(tc_json)
+            except Exception:
+                continue
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                tool = call.get("name")
+                args = call.get("arguments")
+                if not isinstance(tool, str) or args is None:
+                    continue
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        continue
+                try:
+                    sig = tool + "|" + json.dumps(args, sort_keys=True,
+                                                  ensure_ascii=False)
+                except Exception:
+                    continue
+                sig_counts[sig] = sig_counts.get(sig, 0) + 1
+                if sig not in sig_example:
+                    sig_example[sig] = args
+        conn.close()
+    except Exception:
+        return []
+    hits = [{"tool": sig.split("|", 1)[0], "args": sig_example[sig],
+             "count": cnt}
+            for sig, cnt in sig_counts.items() if cnt >= min_repeats]
+    hits.sort(key=lambda h: h["count"], reverse=True)
+    return hits[:top]
+
+
 def _last_event_time(event_type: str) -> float:
     """Когда было последнее событие type в history (0 если никогда)."""
     if not HISTORY_FILE.exists():
@@ -262,7 +344,27 @@ def auto_focus_cycle():
                 result["memory_maintained"] = maint
 
     # Оценка по количеству сообщений (эвристика: 200 сообщений ≈ 50% окна)
-    if tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
+    # Цикл 41 (SELF_IMPROVE 14.08 #2): повторяющиеся tool calls = ранний
+    # сигнал деградации контекста (на ~80K токенов начинаются повторы) —
+    # компактим ПЕРВЫМ делом, не дожидаясь токен-порога.
+    repeats = detect_repeated_calls()
+    result["repeated_calls"] = repeats
+    if repeats:
+        top_hit = repeats[0]
+        last = _last_event_time("compaction")
+        if now_ts - last > COMPACT_COOLDOWN_H * 3600:
+            comp = compact_knowledge()
+            result["action"] = "compacted" if comp["changed"] else "repeat_advised"
+            result["compaction"] = comp
+            result["advice"] = suggest_compact(
+                f"повторяющиеся tool calls: {top_hit['tool']} ×{top_hit['count']} "
+                f"за 2ч — контекст деградирует (ранний сигнал)")
+        else:
+            result["action"] = "repeat_cooldown"
+            result["advice"] = (f"повторяющиеся tool calls ({top_hit['tool']} "
+                                f"×{top_hit['count']}), но компакция была "
+                                f"<{COMPACT_COOLDOWN_H}ч назад — пропускаю")
+    elif tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
         last = _last_event_time("compaction")
         if now_ts - last > COMPACT_COOLDOWN_H * 3600:
             comp = compact_knowledge()
