@@ -670,6 +670,54 @@ def feedback_risk(pattern: str, confirmed: bool,
     return report
 
 
+LOOP_PATTERN_PREFIX = "tool_call_loop:"
+
+
+def feedback_loop_evidence(repeats, data=None) -> dict:
+    """Подтверждённое зацикливание tool calls → усиление streak (цикл 42).
+
+    Grow point SELF_IMPROVE 18.08: детектор повторов focus_agent
+    (detect_repeated_calls) находит 3+ одинаковых tool call за 2ч — это
+    ПОДТВЕРЖДЁННЫЙ паттерн деградации контекста. Каждый такой эпизод
+    усиливает streak "tool_call_loop:<tool>", чтобы предсказатель рисков
+    учитывал зацикливание как реальную ошибку (не только текстовые паттерны
+    из логов).
+
+    repeats: список dict {tool, count, ...} от detect_repeated_calls.
+    data=None → загрузка из PATTERNS_FILE, сохранение при изменении.
+    Пусто/мусор → no-op (patterns=[], saved=False, без журнала).
+    Журнал: data["feedback"] type="loop" (кап FEEDBACK_JOURNAL_MAX).
+    """
+    report = {"patterns": [], "saved": False}
+    valid = [r for r in (repeats or [])
+             if isinstance(r, dict) and isinstance(r.get("tool"), str) and r["tool"]]
+    if not valid:
+        return report
+    data = data if data is not None else _load_data()
+    streaks = data.setdefault("streaks", {})
+    fb = data.setdefault("feedback", [])
+    hist = data.setdefault("history", [])
+    for r in valid:
+        key = LOOP_PATTERN_PREFIX + r["tool"]
+        streaks[key] = streaks.get(key, 0) + 1
+        fb.append({"ts": time.time(), "type": "loop", "tool": r["tool"],
+                   "count": r.get("count"), "streak_after": streaks[key]})
+        # Запись в history — иначе decay_score=0 и predict_risks всегда даёт
+        # low: паттерн зацикливания должен РЕАЛЬНО предсказываться.
+        hist.append({"timestamp": time.time(), "source": "tool_call_loop_detector",
+                     "patterns": {key: 1}})
+        report["patterns"].append(key)
+    data["feedback"] = fb[-FEEDBACK_JOURNAL_MAX:]
+    data["history"] = hist[-100:]  # кап как в update_patterns
+    try:
+        with open(PATTERNS_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        report["saved"] = True
+    except OSError as e:
+        report["error"] = str(e)
+    return report
+
+
 def _pattern_trend(data: dict, pattern: str, window: int = 6) -> str:
     """Тренд появления паттерна по последним сканам: rising / stable / falling / new.
 

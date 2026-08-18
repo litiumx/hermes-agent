@@ -11,6 +11,7 @@ Headroom: 60-95% меньше токенов на JSON, точность сох�
 2. Сжимает большие JSON/tool-output через headroom перед сохранением
 3. Ведёт Knowledge block + историю компрессий
 """
+import importlib
 import json, os, sqlite3, time, subprocess
 from datetime import datetime
 from pathlib import Path
@@ -283,6 +284,24 @@ def detect_repeated_calls(db_path=None, window_sec=REPEAT_WINDOW_SEC,
     return hits[:top]
 
 
+def report_repeats_to_learner(repeats, learner_name="agi_error_pattern_learner") -> dict:
+    """Передать подтверждённые повторы в error-pattern learner (цикл 42).
+
+    Grow point SELF_IMPROVE 18.08: повторы tool calls — подтверждённый
+    паттерн «зацикливание»; learner усиливает streak tool_call_loop:<tool>,
+    чтобы predict_risks учитывал его. Ленивый импорт: модуль недоступен
+    (песочница, другие env) → тихий отказ {"error": ...}, исключения не
+    кидаются — focus-цикл не должен падать из-за learner."""
+    try:
+        mod = importlib.import_module(learner_name)
+        fn = getattr(mod, "feedback_loop_evidence", None)
+        if fn is None:
+            return {"error": f"feedback_loop_evidence not found in {learner_name}"}
+        return fn(repeats)
+    except Exception as e:
+        return {"error": f"learner unavailable: {e}"}
+
+
 def _last_event_time(event_type: str) -> float:
     """Когда было последнее событие type в history (0 если никогда)."""
     if not HISTORY_FILE.exists():
@@ -350,6 +369,9 @@ def auto_focus_cycle():
     repeats = detect_repeated_calls()
     result["repeated_calls"] = repeats
     if repeats:
+        # Цикл 42: подтверждённое зацикливание → фидбек в error-pattern
+        # learner (streak tool_call_loop:<tool>), даже если компакция в кулдауне.
+        result["loop_feedback"] = report_repeats_to_learner(repeats)
         top_hit = repeats[0]
         last = _last_event_time("compaction")
         if now_ts - last > COMPACT_COOLDOWN_H * 3600:
