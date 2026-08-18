@@ -35,3 +35,51 @@
 - Error-pattern интерграция: повторы tool calls → фидбек в learner
   (подтверждённый паттерн «зацикливание»)
 - Параметризовать окно/порог через env (сейчас константы модуля)
+
+---
+
+## SELF_IMPROVE 2026-08-18 (цикл 42) — Loop Feedback: повторы tool calls → error-pattern learner
+
+## Реализовано: полная петля «зацикливание → риск» (grow point цикла 41)
+
+Проблема: детектор повторов (цикл 41) находил зацикливание tool calls, но
+learner об этом не знал — predict_risks предсказывал только текстовые
+паттерны из логов. Подтверждённая деградация контекста не давала фидбека
+в систему предсказания ошибок.
+
+**Решение:**
+- `agi_error_pattern_learner.feedback_loop_evidence(repeats, data=None)`:
+  каждый эпизод зацикливания усиливает streak `tool_call_loop:<tool>` и
+  пишет журнал feedback type="loop" (кап FEEDBACK_JOURNAL_MAX) + запись в
+  history (кап 100, source=tool_call_loop_detector). Без history-записи
+  decay_score=0 → риск всегда low — фича была бы мёртвой (урок ниже).
+  Пусто/мусор → no-op, saved=False, файл не создаётся.
+- `agi_focus_agent.report_repeats_to_learner(repeats, learner_name=...)`:
+  ленивый importlib-импорт learner — модуль недоступен → тихий отказ
+  {"error": ...}, focus-цикл не падает. Вызов из auto_focus_cycle при
+  обнаруженных повторах → result["loop_feedback"] (даже в кулдауне
+  компакции: фидбек не спам, а факт).
+
+Полная петля: 3 эпизода зацикливания (streak>=3) + свежие history-записи
+→ predict_risks возвращает tool_call_loop:<tool> как HIGH (trend не falling,
+decay >= floor).
+
+Тесты: agi_test_loop_feedback.py (25): streak-создание/аккумуляция,
+мульти-тулы, пусто/мусор/None, журнал loop с tool/count, капы журнала,
+переданный data, реальная доставка через focus, тихие отказы (нет модуля,
+нет функции), integration auto_focus_cycle → loop_feedback, полная петля
+до predict_risks high. Регрессия: 50/50 файлов. review: passed.
+
+## Урок
+- Полупетля = мёртвая фича: записал streak, но не history → decay_score=0
+  → риск вечно low. Проверять фичу ПОТРЕБИТЕЛЕМ (predict_risks), а не
+  только своим контрактом. Добавил тест 13 «3 эпизода → high» именно
+  потому, что первый прогон без history-записи давал бы low.
+
+## Grow points (следующие циклы)
+- Продуктивизация: проверить loop_feedback в реальном auto_focus_cycle
+  (песочница) на живом state.db
+- Suggestion для tool_call_loop:<tool> в _SUGGESTIONS (сейчас fallback
+  «Проверить соответствующие сервисы» — можно точечно: «сменить подход,
+  TWO-STRIKE RULE»)
+- Параметризовать окно/порог детектора через env (grow point цикла 41)
