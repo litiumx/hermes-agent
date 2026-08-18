@@ -672,6 +672,28 @@ def feedback_risk(pattern: str, confirmed: bool,
 
 LOOP_PATTERN_PREFIX = "tool_call_loop:"
 
+# Рекомендация для паттернов зацикливания (цикл 43, grow point 18.08):
+# generic «Проверить соответствующие сервисы.» бесполезен для loop-паттерна —
+# нужен actionable совет: TWO-STRIKE RULE + признак деградации контекста.
+LOOP_SUGGESTION = (
+    "Зацикливание tool call '{tool}' (3+ повторов за 2ч). TWO-STRIKE RULE: "
+    "после 2 неудач СТОП — сменить подход или спросить пользователя; "
+    "при деградации контекста — /compact."
+)
+
+
+def _suggestion_for(pattern: str) -> str:
+    """Специфичная рекомендация для паттерна (цикл 43).
+
+    loop-паттерны (tool_call_loop:<tool>) — свой совет с TWO-STRIKE RULE;
+    известные паттерны — прежний _SUGGESTIONS; неизвестные — generic.
+    """
+    if isinstance(pattern, str) and pattern.startswith(LOOP_PATTERN_PREFIX):
+        tool = pattern[len(LOOP_PATTERN_PREFIX):] or "?"
+        # .replace вместо .format: имя тула может содержать {} — format упадёт
+        return LOOP_SUGGESTION.replace("{tool}", tool)
+    return _SUGGESTIONS.get(pattern, "Проверить соответствующие сервисы.")
+
 
 def feedback_loop_evidence(repeats, data=None) -> dict:
     """Подтверждённое зацикливание tool calls → усиление streak (цикл 42).
@@ -799,7 +821,7 @@ def predict_risks(data: dict) -> list:
                 "decay_score": decay,
                 "message": (f"Паттерн '{pattern}' встречался в {count} последних сканах "
                             f"(тренд: {trend}, decay: {decay:.1f}). Вероятен повтор."),
-                "suggestion": _SUGGESTIONS.get(pattern, "Проверить соответствующие сервисы."),
+                "suggestion": _suggestion_for(pattern),
             })
 
     # Проверить время с последнего сбоя
