@@ -83,3 +83,34 @@ decay >= floor).
   «Проверить соответствующие сервисы» — можно точечно: «сменить подход,
   TWO-STRIKE RULE»)
 - Параметризовать окно/порог детектора через env (grow point цикла 41)
+
+
+---
+
+## Цикл 43 (18.08): Suggestion для паттернов зацикливания
+
+**Grow point:** SELF_IMPROVE 18.08 (цикл 42): «Suggestion tool_call_loop:<tool> в _SUGGESTIONS».
+
+**Проблема:** predict_risks выдавал для `tool_call_loop:<tool>` generic
+«Проверить соответствующие сервисы.» — бесполезно для зацикливания: совет
+не говорит СТОП, не упоминает TWO-STRIKE RULE, не называет тул.
+
+**Что сделано (scripts/agi_error_pattern_learner.py):**
+- `LOOP_SUGGESTION` — шаблон с TWO-STRIKE RULE и признаком деградации
+  контекста (/compact).
+- `_suggestion_for(pattern)`: `tool_call_loop:<tool>` → loop-совет с именем
+  тула (`.replace` вместо `.format` — имя тула может содержать `{}`);
+  известные паттерны → прежний _SUGGESTIONS; неизвестные → generic.
+- `predict_risks` использует `_suggestion_for` вместо `_SUGGESTIONS.get`.
+
+**Тесты:** scripts/agi_test_loop_suggestion.py (21 проверка): loop-совет с
+TWO-STRIKE + тулом, пустой тул → '?', необычные имена (пробелы, `{}`),
+префикс без двоеточия → generic, известные паттерны → совет не сломан,
+streak<3 → нет риска, интеграция predict_risks (3 эпизода → high + совет).
+Регрессия: 51/51 файлов, 0 падений. review: passed.
+
+**Grow points (дальше):**
+- self_directed_queue: потреблять suggestion из predict_risks при создании
+  fix-задач (сейчас рекомендация только в отчёте).
+- focus_agent: при повторном срабатывании detect_repeated_calls после
+  compact — эскалация пользователю (не только совет).
