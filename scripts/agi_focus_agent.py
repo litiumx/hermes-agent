@@ -35,6 +35,16 @@ REPEAT_WINDOW_SEC = 7200   # окно поиска повторов tool calls (
 REPEAT_MIN = 3             # минимум одинаковых вызовов = «повтор»
 REPEAT_TOP = 5             # сколько повторяющихся сигнатур показывать
 
+
+def _env_int(name, default):
+    """Прочитать int из env (grow point 41, цикл 46): пустое/не-число → default.
+    Параметризация loop-детектора без правки кода: окно/порог/топ повторов
+    настраиваются AGI_REPEAT_WINDOW_SEC / AGI_REPEAT_MIN / AGI_REPEAT_TOP."""
+    try:
+        return int(os.environ.get(name, "").strip())
+    except (ValueError, TypeError):
+        return default
+
 def compress_with_headroom(text: str, min_len: int = 500) -> str:
     """Сжать текст через headroom library. Если <min_len или ошибка — вернуть как есть."""
     if len(text) < min_len:
@@ -224,17 +234,32 @@ def _parse_ts(value) -> float:
         return 0.0
 
 
-def detect_repeated_calls(db_path=None, window_sec=REPEAT_WINDOW_SEC,
-                          min_repeats=REPEAT_MIN, top=REPEAT_TOP):
+def detect_repeated_calls(db_path=None, window_sec=None, min_repeats=None,
+                          top=None):
     """Детект повторяющихся tool calls в state.db — ранний сигнал деградации
     контекста (SELF_IMPROVE 14.08 #2: на ~80K токенов в multi-step прогоне
     начинаются повторяющиеся tool calls; компактить ПЕРВЫМ делом, не дожидаясь
     порога 70%). Считает одинаковые сигнатуры (tool + аргументы с
     нормализацией порядка ключей) в окне window_sec.
 
+    Параметры (grow point 41, цикл 46): если аргумент не передан явно —
+    читается из env AGI_REPEAT_WINDOW_SEC / AGI_REPEAT_MIN / AGI_REPEAT_TOP
+    при КАЖДОМ вызове (крон может перенастроить без правки кода). Мусор в env
+    (пусто/не-число) → дефолт; клэмпы: window_sec ≥ 0, min_repeats ≥ 1,
+    top ≥ 1. Явные аргументы всегда имеют приоритет над env.
+
     Возвращает список dict {tool, args, count} (топ по count) или [] при
     ошибке/пустоте. Тихий отказ: нет БД/таблицы/колонки/битый JSON/битый ts —
     всё пропускается, исключения не кидаются."""
+    if window_sec is None:
+        window_sec = _env_int("AGI_REPEAT_WINDOW_SEC", REPEAT_WINDOW_SEC)
+    if min_repeats is None:
+        min_repeats = _env_int("AGI_REPEAT_MIN", REPEAT_MIN)
+    if top is None:
+        top = _env_int("AGI_REPEAT_TOP", REPEAT_TOP)
+    window_sec = max(0, window_sec)
+    min_repeats = max(1, min_repeats)
+    top = max(1, top)
     db = db_path or SESSION_STATE
     cutoff = time.time() - window_sec
     sig_counts = {}
