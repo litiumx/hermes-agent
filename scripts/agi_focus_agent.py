@@ -29,6 +29,7 @@ TOKEN_ACT = 0.65
 MAX_COMPRESSIONS_PER_TASK = 6
 COMPACT_COOLDOWN_H = 6    # не чаще раза в 6 часов реальной компакции
 SUGGEST_COOLDOWN_H = 3    # не чаще раза в 3 часа повторных советов "watch"
+ESCALATION_COOLDOWN_H = 24  # эскалация зацикливания — не чаще раза в сутки
 MEMORY_MAINTAIN_COOLDOWN_H = 24  # ретеншн памяти — раз в сутки
 REPEAT_WINDOW_SEC = 7200   # окно поиска повторов tool calls (2 часа)
 REPEAT_MIN = 3             # минимум одинаковых вызовов = «повтор»
@@ -302,6 +303,32 @@ def report_repeats_to_learner(repeats, learner_name="agi_error_pattern_learner")
         return {"error": f"learner unavailable: {e}"}
 
 
+def escalate_loop(repeats, top_hit=None) -> dict:
+    """Эскалация пользователю при зацикливании, которое НЕ сломала компакция
+    (grow point 19.08): повторы tool calls продолжаются, хотя компакция была
+    <COMPACT_COOLDOWN_H назад → совет уже не помогает, нужна ручная проверка.
+
+    Пишет escalation-событие в history (спам-защита на уровне вызова —
+    auto_focus_cycle проверяет ESCALATION_COOLDOWN_H). Возвращает
+    {"message", "tool", "count"}. Пустые repeats → тихий отказ {"message": ""}
+    БЕЗ записи в history; битые записи (нет tool) не роняют цикл."""
+    if not repeats:
+        return {"message": ""}
+    top = top_hit or repeats[0]
+    tool = top.get("tool", "?")
+    count = top.get("count", 0)
+    msg = (f"⚠️ Цикл продолжается после компакции: {tool} ×{count} за 2ч — "
+           f"компакция не сломала зацикливание, нужна ручная проверка/остановка")
+    _log_event({
+        "time": datetime.now().isoformat(),
+        "type": "escalation",
+        "tool": tool,
+        "count": count,
+        "message": msg,
+    })
+    return {"message": msg, "tool": tool, "count": count}
+
+
 def _last_event_time(event_type: str) -> float:
     """Когда было последнее событие type в history (0 если никогда)."""
     if not HISTORY_FILE.exists():
@@ -382,10 +409,19 @@ def auto_focus_cycle():
                 f"повторяющиеся tool calls: {top_hit['tool']} ×{top_hit['count']} "
                 f"за 2ч — контекст деградирует (ранний сигнал)")
         else:
-            result["action"] = "repeat_cooldown"
-            result["advice"] = (f"повторяющиеся tool calls ({top_hit['tool']} "
-                                f"×{top_hit['count']}), но компакция была "
-                                f"<{COMPACT_COOLDOWN_H}ч назад — пропускаю")
+            # Grow point 19.08: компакция была недавно, а повторы ВСЁ ЕЩЕ есть —
+            # компакция не сломала цикл → эскалация пользователю (не просто
+            # совет). Кулдаун эскалации 24ч — не спамим каждый прогон крона.
+            last_esc = _last_event_time("escalation")
+            if now_ts - last_esc > ESCALATION_COOLDOWN_H * 3600:
+                result["escalation"] = escalate_loop(repeats, top_hit)
+                result["action"] = "repeat_escalated"
+                result["advice"] = result["escalation"]["message"]
+            else:
+                result["action"] = "repeat_cooldown"
+                result["advice"] = (f"повторяющиеся tool calls ({top_hit['tool']} "
+                                    f"×{top_hit['count']}), эскалация была "
+                                    f"<{ESCALATION_COOLDOWN_H}ч назад — пропускаю")
     elif tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
         last = _last_event_time("compaction")
         if now_ts - last > COMPACT_COOLDOWN_H * 3600:

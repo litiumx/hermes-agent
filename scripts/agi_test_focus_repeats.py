@@ -164,10 +164,14 @@ check("action=repeat_advised", r["action"] == "repeat_advised", str(r))
 check("repeated_calls в результате", r.get("repeated_calls") is not None, str(r))
 check("advice упоминает tool", "search" in r.get("advice", ""), str(r))
 
-print("== 13. Integration: кулдаун компакции → repeat_cooldown ==")
+print("== 13. Integration: повторы + свежая компакция → эскалация (не тихий cooldown) ==")
 f._log_event({"time": datetime.now().isoformat(), "type": "compaction"})
 r = f.auto_focus_cycle()
-check("action=repeat_cooldown", r["action"] == "repeat_cooldown", str(r))
+check("action=repeat_escalated", r["action"] == "repeat_escalated", str(r.get("action")))
+check("escalation в результате", r.get("escalation", {}).get("tool") == "search", str(r))
+# повторный вызов: эскалация в кулдауне 24ч → тихий repeat_cooldown
+r2 = f.auto_focus_cycle()
+check("повторный → repeat_cooldown", r2["action"] == "repeat_cooldown", str(r2.get("action")))
 
 print("== 14. Integration: без повторов — обычная логика ==")
 db = make_db([("assistant", [tc("search", {"q": "once"})], 60)])
