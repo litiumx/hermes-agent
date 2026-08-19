@@ -143,3 +143,58 @@ Env-параметризация детекторов — дёшево и без
   живом state.db в песочнице (loop_feedback реально доезжает до задачи)
 - Cooldown'ы (COMPACT/SUGGEST/ESCALATION) тоже перевести на env — единый
   механизм настройки частоты циклов без правки кода
+
+
+---
+
+# SELF_IMPROVE 2026-08-19 — Кулдауны через env (цикл 47)
+
+## Реализовано: AGI_COMPACT_COOLDOWN_H / AGI_SUGGEST_COOLDOWN_H /
+AGI_ESCALATION_COOLDOWN_H / AGI_MEMORY_MAINTAIN_COOLDOWN_H
+**Grow point:** SELF_IMPROVE 19.08 (цикл 46): «Cooldown'ы (COMPACT/SUGGEST/
+ESCALATION) тоже перевести на env — единый механизм настройки частоты циклов
+без правки кода».
+
+**Проблема:** COMPACT_COOLDOWN_H (6ч), SUGGEST_COOLDOWN_H (3ч),
+ESCALATION_COOLDOWN_H (24ч), MEMORY_MAINTAIN_COOLDOWN_H (24ч) захардкожены
+в agi_focus_agent.py — частота компакций/советов/эскалаций/ретеншна
+настраивалась только правкой кода и деплоем.
+
+**Что сделано (scripts/agi_focus_agent.py):**
+- `_cooldown_h(name, default)` — кулдаун из env: пустое/не-число → default,
+  отрицательное → 0 (кулдаун отключён). Никогда не кидает исключений.
+- `auto_focus_cycle(compact_cooldown_h=None, suggest_cooldown_h=None,
+  escalation_cooldown_h=None, maintain_cooldown_h=None)` — кулдауны читаются
+  из env при КАЖДОМ вызове, явные аргументы приоритетнее env
+  (backward-compat: существующие вызовы без аргументов не затронуты).
+- Сообщения advice честно отражают env-значение («<1000ч назад»), а не
+  константу — оператор видит реальный кулдаун в отчёте.
+
+**Тесты:** scripts/agi_test_focus_cooldown_env.py (26 проверок): _cooldown_h
+(unset/abc/пусто → default, 0 → 0, -5 → клэмп 0, 12 → 12); COMPACT в
+токен-ветке (env=0 → компактим несмотря на свежую компакцию, env=1000 →
+compact_cooldown, дефолт 6, приоритет kwargs, компакция 7ч назад при env=5);
+COMPACT в repeat-ветке (env=0 → repeat_advised без эскалации, env=1000 →
+эскалация); ESCALATION (env=0 → эскалация при свежей, env=1000 →
+repeat_cooldown с «1000ч назад» в advice, kwargs-приоритет, дефолт 24);
+SUGGEST (env=0 → watch при свежем совете, env=1000 → watch_cooldown);
+MAINTAIN (env=0 → ретеншн выполнен, env=1000 → пропущен); мусор в env
+(esc=x, compact='') → дефолты. Все тесты hermetic: tmp kb/hist/state.db +
+AGI_PATTERNS_FILE в tmp (learner не пишет в реальные файлы).
+
+**Регрессия:** exit-code прогон 56 файлов: 44 PASS, 12 FAIL — все 12
+идентичны на чистом baseline (git stash: 12/12 падают без моих изменений):
+9 — живой SQLite-bridge в песочнице, 3 — scan_* требуют pytest.
+Мои изменения: 0 новых падений. review: passed.
+
+## Урок
+Единый механизм env-настройки (детекторы → кулдауны) окупается: теперь вся
+частота циклов focus_agent'а управляется из крона без единой правки кода.
+Клэмп отрицательных кулдаунов в 0 важен: «-5» в env = спам-машина.
+
+## Grow points (следующие циклы)
+- focus_agent: connected escalation → в Telegram-отчёт (сейчас событие
+  только в history + result) [цикл 45]
+- Продуктивизация: прогнать полную петлю learner → queue → run_next на
+  живом state.db в песочнице (loop_feedback реально доезжает до задачи)
+- Кулдауны субагентов/делегирования (orchestration) — тот же env-механизм
