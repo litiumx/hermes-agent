@@ -286,6 +286,11 @@ def load_state() -> dict:
                             "count": patterns.get("streaks", {}).get(r["pattern"], 3),
                             "trend": r.get("trend", "stable"),
                             "priority": 100,
+                            # Цикл 44: suggestion из predict_risks (напр.
+                            # TWO-STRIKE RULE для tool_call_loop) переносится
+                            # в задачу — раньше существовал только в отчёте
+                            # learner'а, планировщик его выбрасывал.
+                            "suggestion": _clean_suggestion(r.get("suggestion")),
                         })
             else:
                 # Fallback: старый файл без risks — наивный streak-логик
@@ -338,6 +343,14 @@ def load_state() -> dict:
             pass
 
     return state
+
+
+def _clean_suggestion(value) -> str | None:
+    """Нормализовать suggestion из риска: строка с контентом → strip,
+    иначе None (пустые/мусорные значения не попадают в задачи)."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def classify_task(task: str) -> tuple[str, int]:
@@ -410,6 +423,10 @@ def build_queue() -> list[dict]:
             # run_next использует его для авто-фидбека в learner без
             # парсинга текста задачи.
             "pattern": risk["pattern"],
+            # Цикл 44: рекомендация из predict_risks (TWO-STRIKE RULE и т.п.)
+            # — потребитель задачи (run_next/отчёт) получает совет, а не
+            # только текст «Investigate and fix pattern».
+            "suggestion": risk.get("suggestion"),
         })
 
     # 3. Companion-предсказания (grow point циклов 21-24): паттерны, которые
@@ -638,6 +655,11 @@ def run_next() -> dict | None:
     history = load_history()
     result["ts"] = time.time()
     result["ts_human"] = datetime.now(timezone.utc).isoformat()
+    # Цикл 44: suggestion риска (TWO-STRIKE RULE и т.п.) едет в результате —
+    # потребитель run_next видит совет, а не только статус/вывод.
+    suggestion = task_item.get("suggestion")
+    if suggestion:
+        result["suggestion"] = suggestion
     history.append(result)
     _save_history(history)
 
@@ -736,6 +758,11 @@ def get_report() -> str:
                  "research": "🔍", "learn": "📚"}.get(item["category"], "⚪")
         task_short = item["task"][:80]
         lines.append(f"  {i+1}. {emoji} [{item['priority']}] {task_short}")
+        # Цикл 44: рекомендация из predict_risks видна в отчёте сразу
+        # (раньше совет learner'а жил только в его собственном отчёте)
+        suggestion = item.get("suggestion")
+        if suggestion:
+            lines.append(f"     ↳ совет: {suggestion[:100]}")
 
     lines.append(f"\n  📊 Всего в очереди: {len(queue)} задач")
     return "\n".join(lines)
