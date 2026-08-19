@@ -45,6 +45,14 @@ def _env_int(name, default):
     except (ValueError, TypeError):
         return default
 
+def _cooldown_h(name, default):
+    """Кулдаун (часы) из env (grow point 46, цикл 47): пустое/не-число →
+    default, отрицательное → 0 (кулдаун отключён). Единый механизм настройки
+    частоты компакций/советов/эскалаций/ретеншна без правки кода:
+    AGI_COMPACT_COOLDOWN_H / AGI_SUGGEST_COOLDOWN_H / AGI_ESCALATION_COOLDOWN_H
+    / AGI_MEMORY_MAINTAIN_COOLDOWN_H."""
+    return max(0, _env_int(name, default))
+
 def compress_with_headroom(text: str, min_len: int = 500) -> str:
     """Сжать текст через headroom library. Если <min_len или ошибка — вернуть как есть."""
     if len(text) < min_len:
@@ -384,10 +392,28 @@ def _memory_maintenance():
         return None
 
 
-def auto_focus_cycle():
+def auto_focus_cycle(compact_cooldown_h=None, suggest_cooldown_h=None,
+                     escalation_cooldown_h=None, maintain_cooldown_h=None):
     """Главный цикл — вызывать из крона каждые 30 мин.
     С кулдаунами: компакция не чаще COMPACT_COOLDOWN_H, советы watch не чаще
-    SUGGEST_COOLDOWN_H — иначе каждый прогон при большом контексте спамит."""
+    SUGGEST_COOLDOWN_H — иначе каждый прогон при большом контексте спамит.
+
+    Кулдауны (grow point 46, цикл 47) настраиваются env БЕЗ правки кода:
+    AGI_COMPACT_COOLDOWN_H / AGI_SUGGEST_COOLDOWN_H / AGI_ESCALATION_COOLDOWN_H
+    / AGI_MEMORY_MAINTAIN_COOLDOWN_H. Явные аргументы имеют приоритет над env;
+    мусор в env → дефолт; отрицательное → 0 (кулдаун отключён)."""
+    if compact_cooldown_h is None:
+        compact_cooldown_h = _cooldown_h("AGI_COMPACT_COOLDOWN_H",
+                                         COMPACT_COOLDOWN_H)
+    if suggest_cooldown_h is None:
+        suggest_cooldown_h = _cooldown_h("AGI_SUGGEST_COOLDOWN_H",
+                                         SUGGEST_COOLDOWN_H)
+    if escalation_cooldown_h is None:
+        escalation_cooldown_h = _cooldown_h("AGI_ESCALATION_COOLDOWN_H",
+                                            ESCALATION_COOLDOWN_H)
+    if maintain_cooldown_h is None:
+        maintain_cooldown_h = _cooldown_h("AGI_MEMORY_MAINTAIN_COOLDOWN_H",
+                                          MEMORY_MAINTAIN_COOLDOWN_H)
     msgs, tokens = get_context_usage()
     kb = load_kb()
     result = {
@@ -407,7 +433,7 @@ def auto_focus_cycle():
     # случайного трогания prod-БД в тестах/песочнице. Кулдаун 24ч.
     if os.environ.get("AGI_MAINTAIN_MEMORY") == "1":
         last_m = _last_event_time("memory_maintain")
-        if now_ts - last_m > MEMORY_MAINTAIN_COOLDOWN_H * 3600:
+        if now_ts - last_m > maintain_cooldown_h * 3600:
             maint = _memory_maintenance()
             if maint is not None:
                 _log_event({"time": datetime.now().isoformat(),
@@ -426,7 +452,7 @@ def auto_focus_cycle():
         result["loop_feedback"] = report_repeats_to_learner(repeats)
         top_hit = repeats[0]
         last = _last_event_time("compaction")
-        if now_ts - last > COMPACT_COOLDOWN_H * 3600:
+        if now_ts - last > compact_cooldown_h * 3600:
             comp = compact_knowledge()
             result["action"] = "compacted" if comp["changed"] else "repeat_advised"
             result["compaction"] = comp
@@ -438,7 +464,7 @@ def auto_focus_cycle():
             # компакция не сломала цикл → эскалация пользователю (не просто
             # совет). Кулдаун эскалации 24ч — не спамим каждый прогон крона.
             last_esc = _last_event_time("escalation")
-            if now_ts - last_esc > ESCALATION_COOLDOWN_H * 3600:
+            if now_ts - last_esc > escalation_cooldown_h * 3600:
                 result["escalation"] = escalate_loop(repeats, top_hit)
                 result["action"] = "repeat_escalated"
                 result["advice"] = result["escalation"]["message"]
@@ -446,10 +472,10 @@ def auto_focus_cycle():
                 result["action"] = "repeat_cooldown"
                 result["advice"] = (f"повторяющиеся tool calls ({top_hit['tool']} "
                                     f"×{top_hit['count']}), эскалация была "
-                                    f"<{ESCALATION_COOLDOWN_H}ч назад — пропускаю")
+                                    f"<{escalation_cooldown_h}ч назад — пропускаю")
     elif tok_ratio > TOKEN_ACT or msgs > 600:  # >65% окна
         last = _last_event_time("compaction")
-        if now_ts - last > COMPACT_COOLDOWN_H * 3600:
+        if now_ts - last > compact_cooldown_h * 3600:
             comp = compact_knowledge()
             result["action"] = "compacted" if comp["changed"] else "compact_advised"
             result["compaction"] = comp
@@ -458,10 +484,10 @@ def auto_focus_cycle():
         else:
             result["action"] = "compact_cooldown"
             result["advice"] = (f"контекст большой ({msgs} сообщений), но компакция "
-                                f"была <{COMPACT_COOLDOWN_H}ч назад — пропускаю")
+                                f"была <{compact_cooldown_h}ч назад — пропускаю")
     elif tok_ratio > TOKEN_WARN or msgs > 450:  # >50%
         last = _last_event_time("suggestion")
-        if now_ts - last > SUGGEST_COOLDOWN_H * 3600:
+        if now_ts - last > suggest_cooldown_h * 3600:
             result["action"] = "watch"
             result["advice"] = (f"контекст растёт: {msgs} сообщений, ~{tokens} токенов, "
                                 f"следим")
